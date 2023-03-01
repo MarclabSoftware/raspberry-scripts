@@ -5,17 +5,18 @@ if [ "${EUID:-$(id -u)}" -eq 0 ]; then
     exit 1
 fi
 
-HOME="/home/${USER}"
-FILENAME="ssh-audit-master"
-FULLPATH="${HOME}/${FILENAME}"
+URL="https://github.com/jtesta/ssh-audit/archive/refs/heads/master.zip"
+FILENAME="ssh-audit-master.zip"
+FILEPATH_F="${HOME}/${FILENAME}"
+DIRPATH_D="${HOME}/$(basename "${FILEPATH_F}" .zip)"
 
 cd "${HOME}" || exit 1
-rm -rf "${FULLPATH}"
-curl -o "${FULLPATH}.zip" -OL https://github.com/jtesta/ssh-audit/archive/refs/heads/master.zip
-unzip "${FULLPATH}.zip"
-rm -f "${FULLPATH}.zip"
-"${FULLPATH}/ssh-audit.py" localhost
-#"${FULLPATH}/ssh-audit.py" -L
-#"${FULLPATH}/ssh-audit.py" -P "Hardened Ubuntu Server 22.04 LTS (version 1)" localhost
+rm -rf "${FILEPATH_F}"
+curl -o "${FILEPATH_F}" -OL "${URL}"
+unzip "${FILEPATH_F}"
+rm -f "${FILEPATH_F}"
+"${DIRPATH_D}/ssh-audit.py" localhost
+#"${DIRPATH_D}/ssh-audit.py" -L
+#"${DIRPATH_D}/ssh-audit.py" -P "Hardened Ubuntu Server 22.04 LTS (version 1)" localhost
 
 exit 0
