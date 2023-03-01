@@ -56,6 +56,8 @@ MACVLAN_SUBNET="192.168.21.0/24"
 MACVLAN_GATEWAY="192.168.21.1"
 BACKUP_F="${HOME_USER_D}/backup.tar.gz"
 SSH_USEFUL_HOSTS=("github.com" "gitlab.com" "bitbucket.org" "ssh.dev.azure.com" "vs-ssh.visualstudio.com")
+SSD_VENDOR="04e8" # lsusb to find it
+SSD_PRODUCT="61f5" # lsusb to find it
 
 # Safety checks
 if [ ! "${EUID:-$(id -u)}" -eq 0 ]; then
@@ -179,7 +181,7 @@ net.ipv4.ip_forward = 1" | tee "${NETWORK_SYSCTL_CONF_F}" >/dev/null
 
     # SSD Trim
     echo -e "\n\nAdding fstrim confs for samsung T5 USB SSD to ${TRIM_RULES_F}"
-    echo -e 'ACTION=="add|change", ATTRS{idVendor}=="04e8", ATTRS{idProduct}=="61f5", SUBSYSTEM=="scsi_disk", ATTR{provisioning_mode}="unmap"' | tee "${TRIM_RULES_F}" >/dev/null
+    echo -e 'ACTION=="add|change", ATTRS{idVendor}=="'${SSD_VENDOR}'", ATTRS{idProduct}=="'${SSD_PRODUCT}'", SUBSYSTEM=="scsi_disk", ATTR{provisioning_mode}="unmap"' | tee "${TRIM_RULES_F}" >/dev/null
     udevadm control --reload-rules
     udevadm trigger
     fstrim -av
