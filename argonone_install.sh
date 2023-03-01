@@ -1,13 +1,9 @@
 #!/usr/bin/env bash
 
 # Vars
-AUR_PKG_D="/home/${USER}/aur_packages"
+AUR_PKGS_D="/home/${USER}/aur_packages"
 GIT_URL="https://aur.archlinux.org/argonone-c-git.git"
-
-# Functions
-gclonecd() {
-    git clone "$1" && cd "$(basename "$1" .git)" || exit 2
-}
+PKG_D="${AUR_PKGS_D}/$(basename "${GIT_URL}" .git)"
 
 # Main
 if [ "${EUID:-$(id -u)}" -eq 0 ]; then
@@ -15,9 +11,17 @@ if [ "${EUID:-$(id -u)}" -eq 0 ]; then
     exit 1
 fi
 
-[ -d "${AUR_PKG_D}" ] || mkdir -p "${AUR_PKG_D}"
-cd "${AUR_PKG_D}" || exit 1
-gclonecd "${GIT_URL}"
+[ -d "${AUR_PKGS_D}" ] || mkdir -p "${AUR_PKGS_D}"
+cd "${AUR_PKGS_D}" || exit 1
+
+if [ -d "${PKG_D}" ]; then
+    cd "${PKG_D}" || exit 2
+    git pull
+else
+    git clone "${GIT_URL}"
+    cd "${PKG_D}" || exit 3
+fi
+
 makepkg -cfsi
 
 exit 0
