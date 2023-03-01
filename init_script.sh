@@ -102,8 +102,10 @@ if [ ! -f "${SCRIPT_HELPER_PASS_1_F}" ] && [ ! -f "${SCRIPT_HELPER_PASS_2_F}" ];
     echo -e "[Journal]\nSystemMaxUse=${JOURNAL_SYSTEM_MAX}\nSystemMaxFileSize=${JOURNAL_FILE_MAX}" | tee "${JOURNAL_CONF_D}/size.conf" >/dev/null
 
     # Pacman
-    echo -e "\n\nUpdating packages"
+    echo -e "\n\nUpdating pacman mirrors"
     pacman-mirrors --country "${PACMAN_MIRRORS_COUNTRIES}"
+
+    echo -e "\n\nUpdating packages"
     pacman -Syyuu --noconfirm
 
     echo -e "\n\nInstalling new packages"
