@@ -10,6 +10,7 @@ HOME_USER_D="/home/${1}"
 HOME_ROOT_D="/root"
 SCRIPT_HELPER_PASS_1_F="${HOME_USER_D}/.init_script_pass1_ok"
 SCRIPT_HELPER_PASS_2_F="${HOME_USER_D}/.init_script_pass2_ok"
+JOURNAL_CONF_D="/etc/systemd/journald.conf.d"
 SUDOERS_F="/etc/sudoers.d/11-${1}"
 BOOT_CONF_F="/boot/config.txt"
 BOOT_CMDLINE_F="/boot/cmdline.txt"
@@ -38,6 +39,8 @@ TIMESYNCD_CONFS_D="/etc/systemd/timesyncd.conf.d"
 TIMESYNCD_CONF_F="${TIMESYNCD_CONFS_D}/timesyncd-${1}.conf"
 
 # Configurable variables
+JOURNAL_SYSTEM_MAX="250M"
+JOURNAL_FILE_MAX="50M"
 PACMAN_MIRRORS_COUNTRIES="Italy,Global,Germany,Switzerland,Czechia,France,Netherlands,Austria"
 PACMAN_PACKAGES=("htop" "git" "unzip" "docker" "docker-compose" "python-pip" "bluez" "bluez-utils" "base-devel")
 GROUPS_TO_ADD=("docker" "tty" "uucp" "lp")
@@ -56,7 +59,7 @@ MACVLAN_SUBNET="192.168.21.0/24"
 MACVLAN_GATEWAY="192.168.21.1"
 BACKUP_F="${HOME_USER_D}/backup.tar.gz"
 SSH_USEFUL_HOSTS=("github.com" "gitlab.com" "bitbucket.org" "ssh.dev.azure.com" "vs-ssh.visualstudio.com")
-SSD_VENDOR="04e8" # lsusb to find it
+SSD_VENDOR="04e8"  # lsusb to find it
 SSD_PRODUCT="61f5" # lsusb to find it
 
 # Safety checks
@@ -93,8 +96,13 @@ if [ ! -f "${SCRIPT_HELPER_PASS_1_F}" ] && [ ! -f "${SCRIPT_HELPER_PASS_2_F}" ];
     rfkill block wlan
     echo "WLAN Blocked"
 
+    # Limit log size
+    echo -e "\n\nLimit journal size"
+    mkdir -p "${JOURNAL_CONF_D}"
+    echo -e "[Journal]\nSystemMaxUse=${JOURNAL_SYSTEM_MAX}\nSystemMaxFileSize=${JOURNAL_FILE_MAX}" | tee "${JOURNAL_CONF_D}/size.conf" >/dev/null
+
     # Pacman
-    echo -e "\n\nUpdating packages\n"
+    echo -e "\n\nUpdating packages"
     pacman-mirrors --country "${PACMAN_MIRRORS_COUNTRIES}"
     pacman -Syyuu --noconfirm
 
