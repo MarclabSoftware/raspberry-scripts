@@ -45,18 +45,18 @@ PACMAN_MIRRORS_COUNTRIES="Italy,Global,Germany,Switzerland,Czechia,France,Nether
 PACMAN_PACKAGES=("htop" "git" "unzip" "docker" "docker-compose" "python-pip" "bluez" "bluez-utils" "base-devel")
 GROUPS_TO_ADD=("docker" "tty" "uucp" "lp")
 LAN_INTERFACE="end0"
-EEPROM_UPDATE_BRANCH="beta"
-DNS_FIRST_PASS="1.1.1.1"
+EEPROM_UPDATE_BRANCH="stable"
+DNS_FIRST_PASS="8.8.8.8" #"1.1.1.1"
 DNS_SECOND_PASS="127.0.0.1"
-FALLBACK_DNS="127.0.0.1:5335 192.168.21.1"
+FALLBACK_DNS="8.8.4.4" #"127.0.0.1:5335 192.168.21.1"
 DNS_SEC_FIRST_PASS="no"
 DNS_SEC_SECOND_PASS="yes"
 NTP_SERVERS="192.168.21.1"
 FALLBACK_NTP_SERVERS="time.cloudflare.com 193.204.114.232 193.204.114.233"
-MACVLAN_STATIC_IP="192.168.21.225"
-MACVLAN_RANGE="192.168.21.224/27"
-MACVLAN_SUBNET="192.168.21.0/24"
-MACVLAN_GATEWAY="192.168.21.1"
+MACVLAN_STATIC_IP="192.168.45.193"
+MACVLAN_RANGE="192.168.45.224/27"
+MACVLAN_SUBNET="192.168.45.0/24"
+MACVLAN_GATEWAY="192.168.45.1"
 BACKUP_F="${HOME_USER_D}/backup.tar.gz"
 SSH_USEFUL_HOSTS=("github.com" "gitlab.com" "bitbucket.org" "ssh.dev.azure.com" "vs-ssh.visualstudio.com")
 SSD_VENDOR="04e8"  # lsusb to find it
@@ -164,18 +164,18 @@ if [ ! -f "${SCRIPT_HELPER_PASS_1_F}" ] && [ ! -f "${SCRIPT_HELPER_PASS_2_F}" ];
     fi
 
     # Overclock
-    echo -e "\n\nSetting overclock"
-    if ! grep -q "# Overclock-${1}" "${BOOT_CONF_F}"; then
-        echo "Overclock config not found"
-        cp -a "${BOOT_CONF_F}" "${BOOT_CONF_F}.bak"
-        echo "Boot config file backed up at ${BOOT_CONF_F}.bak"
-        echo \
-            "# Overclock-${1}
-over_voltage=6
-arm_freq=2000
-#gpu_freq=750" | tee -a "${BOOT_CONF_F}" >/dev/null
-        echo -e "Overclock will be applied at the next boot."
-    fi
+#     echo -e "\n\nSetting overclock"
+#     if ! grep -q "# Overclock-${1}" "${BOOT_CONF_F}"; then
+#         echo "Overclock config not found"
+#         cp -a "${BOOT_CONF_F}" "${BOOT_CONF_F}.bak"
+#         echo "Boot config file backed up at ${BOOT_CONF_F}.bak"
+#         echo \
+#             "# Overclock-${1}
+# over_voltage=6
+# arm_freq=2000
+# #gpu_freq=750" | tee -a "${BOOT_CONF_F}" >/dev/null
+#         echo -e "Overclock will be applied at the next boot."
+#     fi
 
     # Sysctl
     echo -e "\n\nAdding network confs to ${NETWORK_SYSCTL_CONF_F}"
@@ -190,59 +190,60 @@ net.core.wmem_max = 8388608
 net.ipv4.ip_forward = 1" | tee "${NETWORK_SYSCTL_CONF_F}" >/dev/null
 
     # SSD Trim
-    echo -e "\n\nAdding fstrim confs for samsung T5 USB SSD to ${TRIM_RULES_F}"
-    echo -e 'ACTION=="add|change", ATTRS{idVendor}=="'${SSD_VENDOR}'", ATTRS{idProduct}=="'${SSD_PRODUCT}'", SUBSYSTEM=="scsi_disk", ATTR{provisioning_mode}="unmap"' | tee "${TRIM_RULES_F}" >/dev/null
-    udevadm control --reload-rules
-    udevadm trigger
-    fstrim -av
-    systemctl enable --now fstrim.timer
+    # echo -e "\n\nAdding fstrim confs for samsung T5 USB SSD to ${TRIM_RULES_F}"
+    # echo -e 'ACTION=="add|change", ATTRS{idVendor}=="'${SSD_VENDOR}'", ATTRS{idProduct}=="'${SSD_PRODUCT}'", SUBSYSTEM=="scsi_disk", ATTR{provisioning_mode}="unmap"' | tee "${TRIM_RULES_F}" >/dev/null
+    # udevadm control --reload-rules
+    # udevadm trigger
+    # fstrim -av
+    # systemctl enable --now fstrim.timer
 
     # NTP
-    echo -e "\n\nTimesyncd setup"
-    mkdir -p "${TIMESYNCD_CONFS_D}"
-    echo \
-        "# See timesyncd.conf(5) for details.
-[Time]
-NTP=${NTP_SERVERS}
-FallbackNTP=${FALLBACK_NTP_SERVERS}
-#RootDistanceMaxSec=5
-#PollIntervalMinSec=32
-#PollIntervalMaxSec=2048
-#ConnectionRetrySec=30
-#SaveIntervalSec=60" | tee "${TIMESYNCD_CONF_F}" >/dev/null
-    systemctl restart systemd-timesyncd
+#     echo -e "\n\nTimesyncd setup"
+#     mkdir -p "${TIMESYNCD_CONFS_D}"
+#     echo \
+#         "# See timesyncd.conf(5) for details.
+# [Time]
+# NTP=${NTP_SERVERS}
+# FallbackNTP=${FALLBACK_NTP_SERVERS}
+# #RootDistanceMaxSec=5
+# #PollIntervalMinSec=32
+# #PollIntervalMaxSec=2048
+# #ConnectionRetrySec=30
+# #SaveIntervalSec=60" | tee "${TIMESYNCD_CONF_F}" >/dev/null
+#     systemctl restart systemd-timesyncd
 
     # SSH
-    echo -e "\n\nAdding ssh user configs"
-    mkdir -p "${SSH_ROOT_D}"
-    sudo -u "${1}" mkdir -p "${SSH_USER_D}"
-    chmod 700 "${SSH_ROOT_D}" "${SSH_USER_D}"
-    echo -e "Please insert public SSH key for ${1} and press Enter\nEG: ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIB8Ht8Z3j6yDWPBHQtOp/R9rjWvfMYo3MSA/K6q8D86r"
-    read -r
-    echo "${REPLY}" | sudo -u "${1}" tee -a "${SSH_AUTHORIZED_KEY_USER_F}" >/dev/null
-    echo -e "Please insert public SSH key for root user and press Enter\nKeep blank to skip\nEG: ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIB8Ht8Z3j6yDWPBHQtOp/R9rjWvfMYo3MSA/K6q8D86r"
-    read -r
-    echo "${REPLY}" | tee -a "${SSH_AUTHORIZED_KEY_ROOT_F}" >/dev/null
+    # echo -e "\n\nAdding ssh user configs"
+    # mkdir -p "${SSH_ROOT_D}"
+    # sudo -u "${1}" mkdir -p "${SSH_USER_D}"
+    # chmod 700 "${SSH_ROOT_D}" "${SSH_USER_D}"
+    # echo -e "Please insert public SSH key for ${1} and press Enter\nEG: ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIB8Ht8Z3j6yDWPBHQtOp/R9rjWvfMYo3MSA/K6q8D86r"
+    # read -r
+    # echo "${REPLY}" | sudo -u "${1}" tee -a "${SSH_AUTHORIZED_KEY_USER_F}" >/dev/null
+    # echo -e "Please insert public SSH key for root user and press Enter\nKeep blank to skip\nEG: ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIB8Ht8Z3j6yDWPBHQtOp/R9rjWvfMYo3MSA/K6q8D86r"
+    # read -r
+    # echo "${REPLY}" | tee -a "${SSH_AUTHORIZED_KEY_ROOT_F}" >/dev/null
 
     echo -e "\n\nAdding useful known hosts"
     ssh-keyscan "${SSH_USEFUL_HOSTS[@]}" | tee "${SSH_KNOWN_HOSTS_ROOT_F}" >/dev/null
+    mkdir -p "${SSH_USER_D}"
     cp "${SSH_KNOWN_HOSTS_ROOT_F}" "${SSH_KNOWN_HOSTS_USER_F}"
     chown "${1}:${1}" "${SSH_KNOWN_HOSTS_USER_F}"
     chmod 600 "${SSH_AUTHORIZED_KEY_ROOT_F}" "${SSH_AUTHORIZED_KEY_USER_F}" "${SSH_KNOWN_HOSTS_ROOT_F}" "${SSH_KNOWN_HOSTS_USER_F}"
 
-    echo -e "\n\nHardening SSH\nhttps://www.ssh-audit.com/hardening_guides.html for details"
-    rm -rf "${SSH_CONF_D}"/ssh_host_*
-    ssh-keygen -t rsa -b 4096 -f "${SSH_CONF_D}/ssh_host_rsa_key" -N ""
-    ssh-keygen -t ed25519 -f "${SSH_CONF_D}/ssh_host_ed25519_key" -N ""
-    awk '$5 >= 3071' "${SSH_CONF_D}/moduli" >"${SSH_CONF_D}/moduli.safe"
-    mv "${SSH_CONF_D}/moduli.safe" "${SSH_CONF_D}/moduli"
-    mv "${SSH_CONF_F}" "${SSH_CONF_F}.bak"
-    echo "${SSH_CONF_F} backed up to ${SSH_CONF_F}.bak"
-    #TODO
-    echo -e "\n\nPlease paste and save the new sshd_config"
-    read -n 1 -s -r -p "Press any key to continue"
-    nano "${SSH_CONF_F}"
-    echo -e "\n\nPlease test the new sshd_config before rebooting\nIf the command sudo sshd -t has no output the config is ok, otherway check it"
+    # echo -e "\n\nHardening SSH\nhttps://www.ssh-audit.com/hardening_guides.html for details"
+    # rm -rf "${SSH_CONF_D}"/ssh_host_*
+    # ssh-keygen -t rsa -b 4096 -f "${SSH_CONF_D}/ssh_host_rsa_key" -N ""
+    # ssh-keygen -t ed25519 -f "${SSH_CONF_D}/ssh_host_ed25519_key" -N ""
+    # awk '$5 >= 3071' "${SSH_CONF_D}/moduli" >"${SSH_CONF_D}/moduli.safe"
+    # mv "${SSH_CONF_D}/moduli.safe" "${SSH_CONF_D}/moduli"
+    # mv "${SSH_CONF_F}" "${SSH_CONF_F}.bak"
+    # echo "${SSH_CONF_F} backed up to ${SSH_CONF_F}.bak"
+    # #TODO
+    # echo -e "\n\nPlease paste and save the new sshd_config"
+    # read -n 1 -s -r -p "Press any key to continue"
+    # nano "${SSH_CONF_F}"
+    # echo -e "\n\nPlease test the new sshd_config before rebooting\nIf the command sudo sshd -t has no output the config is ok, otherway check it"
 
     # MacVLAN host <-> docker bridge
     echo -e "\n\nMacVLAN setup"
@@ -283,7 +284,7 @@ ConfigureWithoutCarrier=yes" | tee "${SYSTEMD_NETWORK_D}/macvlan-${1}.network" >
     echo -e "\nBluetooth service enabled & started"
 
     echo -e "\n\nEnabling Docker service"
-    systemctl enable docker.service
+    systemctl enable docker.service #  FIXME: Failed to enable unit: File docker.service: Is a directory
     echo -e "\nDocker service enabled"
 
     # DNS
@@ -339,11 +340,11 @@ noipv6" | tee -a "${DHCPD_CONF_F}" >/dev/null
     echo "IPv6 disabled"
 
     # Filesystem optimizations
-    echo -e "\n\nFilesystem SSD optimizations"
-    cp -a /etc/fstab /etc/fstab.bak
-    echo "/etc/fstab backed up to /etc/fstab.bak"
-    sed -i 's/defaults/defaults,noatime/g' /etc/fstab
-    echo "Filesystem optimizations done"
+    # echo -e "\n\nFilesystem SSD optimizations"
+    # cp -a /etc/fstab /etc/fstab.bak
+    # echo "/etc/fstab backed up to /etc/fstab.bak"
+    # sed -i 's/defaults/defaults,noatime/g' /etc/fstab
+    # echo "Filesystem optimizations done"
 
     # Pass 1 done
     sudo -u "${1}" touch "${SCRIPT_HELPER_PASS_1_F}"
