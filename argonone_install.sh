@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 
 # Vars
-AUR_PKG_D="${USER}/aur_packages"
+AUR_PKG_D="/home/${USER}/aur_packages"
 GIT_URL="https://aur.archlinux.org/argonone-c-git.git"
 
 # Functions
