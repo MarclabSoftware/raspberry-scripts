@@ -1,6 +1,11 @@
 #!/usr/bin/env bash
 
-# Const vars, don't touch them
+# Bash colors
+RED='\033[0;31m'   # Red color
+GREEN='\033[0;32m' # Green color
+NC='\033[0m'       # No color
+
+# Constants, don't touch them
 HOME_USER_D="/home/${1}"
 HOME_ROOT_D="/root"
 SCRIPT_HELPER_PASS_1_F="${HOME_USER_D}/.init_script_pass1_ok"
@@ -32,18 +37,15 @@ DHCPD_CONF_F="/etc/dhcpcd.conf"
 TIMESYNCD_CONFS_D="/etc/systemd/timesyncd.conf.d"
 TIMESYNCD_CONF_F="${TIMESYNCD_CONFS_D}/timesyncd-${1}.conf"
 
-# Bash colors
-RED='\033[0;31m'   # Red color
-GREEN='\033[0;32m' # Green color
-NC='\033[0m'       # No color
-
-# Configurable vars
+# Configurable variables
+PACMAN_MIRRORS_COUNTRIES="Italy,Global,Germany,Switzerland,Czechia,France,Netherlands,Austria"
+PACMAN_PACKAGES=("htop" "git" "unzip" "docker" "docker-compose" "python-pip" "bluez" "bluez-utils" "base-devel")
 GROUPS_TO_ADD=("docker" "tty" "uucp" "lp")
 LAN_INTERFACE="end0"
 EEPROM_UPDATE_BRANCH="beta"
 DNS_FIRST_PASS="1.1.1.1"
-FALLBACK_DNS="127.0.0.1:5335 192.168.21.1"
 DNS_SECOND_PASS="127.0.0.1"
+FALLBACK_DNS="127.0.0.1:5335 192.168.21.1"
 DNS_SEC_FIRST_PASS="no"
 DNS_SEC_SECOND_PASS="yes"
 NTP_SERVERS="192.168.21.1"
@@ -53,7 +55,7 @@ MACVLAN_RANGE="192.168.21.224/27"
 MACVLAN_SUBNET="192.168.21.0/24"
 MACVLAN_GATEWAY="192.168.21.1"
 BACKUP_F="${HOME_USER_D}/backup.tar.gz"
-SSH_USEFUL_HOSTS=(github.com gitlab.com bitbucket.org ssh.dev.azure.com vs-ssh.visualstudio.com)
+SSH_USEFUL_HOSTS=("github.com" "gitlab.com" "bitbucket.org" "ssh.dev.azure.com" "vs-ssh.visualstudio.com")
 
 # Safety checks
 if [ ! "${EUID:-$(id -u)}" -eq 0 ]; then
@@ -91,14 +93,18 @@ if [ ! -f "${SCRIPT_HELPER_PASS_1_F}" ] && [ ! -f "${SCRIPT_HELPER_PASS_2_F}" ];
 
     # Pacman
     echo -e "\n\nUpdating packages\n"
-    pacman-mirrors --country Italy,Global,Germany,Switzerland,Czechia,France,Netherlands,Austria
+    pacman-mirrors --country "${PACMAN_MIRRORS_COUNTRIES}"
     pacman -Syyuu --noconfirm
 
     echo -e "\n\nInstalling new packages"
-    pacman -S --noconfirm htop git unzip docker docker-compose python-pip bluez bluez-utils
+    pacman -S --noconfirm --needed "${PACMAN_PACKAGES[@]}"
 
     echo -e "\n\nRemoving orphaned packages"
     pacman -Qtdq | pacman --noconfirm -Rns -
+
+    echo -e "\n\nRemoving unneded cached packages"
+    paccache -rk1
+    paccache -ruk0
 
     echo -e "\n\nEnabling Pacman colored output"
     cp -a "${PACMAN_CONF_F}" "${PACMAN_CONF_F}.bak"
@@ -156,11 +162,11 @@ if [ ! -f "${SCRIPT_HELPER_PASS_1_F}" ] && [ ! -f "${SCRIPT_HELPER_PASS_2_F}" ];
 over_voltage=6
 arm_freq=2000
 #gpu_freq=750" | tee -a "${BOOT_CONF_F}" >/dev/null
-        echo -e "\nOverclock will be applied at the next boot."
+        echo -e "Overclock will be applied at the next boot."
     fi
 
     # Sysctl
-    echo "Adding network confs to ${NETWORK_SYSCTL_CONF_F}"
+    echo -e "\n\nAdding network confs to ${NETWORK_SYSCTL_CONF_F}"
     echo \
         "# Improve Network performance
 # This sets the max OS receive buffer size for all types of connections.
@@ -180,7 +186,7 @@ net.ipv4.ip_forward = 1" | tee "${NETWORK_SYSCTL_CONF_F}" >/dev/null
     systemctl enable --now fstrim.timer
 
     # NTP
-    echo "Timesyncd setup"
+    echo -e "\n\nTimesyncd setup"
     mkdir -p "${TIMESYNCD_CONFS_D}"
     echo \
         "# See timesyncd.conf(5) for details.
@@ -205,6 +211,8 @@ FallbackNTP=${FALLBACK_NTP_SERVERS}
     echo -e "Please insert public SSH key for root user and press Enter\nKeep blank to skip\nEG: ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIB8Ht8Z3j6yDWPBHQtOp/R9rjWvfMYo3MSA/K6q8D86r"
     read -r
     echo "${REPLY}" | tee -a "${SSH_AUTHORIZED_KEY_ROOT_F}" >/dev/null
+
+    echo -e "\n\nAdding useful known hosts"
     ssh-keyscan "${SSH_USEFUL_HOSTS[@]}" | tee "${SSH_KNOWN_HOSTS_ROOT_F}" >/dev/null
     cp "${SSH_KNOWN_HOSTS_ROOT_F}" "${SSH_KNOWN_HOSTS_USER_F}"
     chown "${1}:${1}" "${SSH_KNOWN_HOSTS_USER_F}"
@@ -316,14 +324,14 @@ IPv6AcceptRA=no" | tee -a "${SYSTEMD_NETWORK_D}/macvlan-${1}.network" >/dev/null
         "ipv4only
 noipv6rs
 noipv6" | tee -a "${DHCPD_CONF_F}" >/dev/null
-    echo -e "\nIPv6 disabled"
+    echo "IPv6 disabled"
 
     # Filesystem optimizations
     echo -e "\n\nFilesystem SSD optimizations"
     cp -a /etc/fstab /etc/fstab.bak
     echo "/etc/fstab backed up to /etc/fstab.bak"
     sed -i 's/defaults/defaults,noatime/g' /etc/fstab
-    echo -e "\nFilesystem optimizations done"
+    echo "Filesystem optimizations done"
 
     # Pass 1 done
     sudo -u "${1}" touch "${SCRIPT_HELPER_PASS_1_F}"
