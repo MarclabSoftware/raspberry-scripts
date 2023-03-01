@@ -11,7 +11,7 @@ FILEPATH_F="${HOME}/${FILENAME}"
 DIRPATH_D="${HOME}/$(basename "${FILEPATH_F}" .zip)"
 
 cd "${HOME}" || exit 1
-rm -rf "${FILEPATH_F}"
+rm -rf "${FILEPATH_F}" "${DIRPATH_D}"
 curl -o "${FILEPATH_F}" -OL "${URL}"
 unzip "${FILEPATH_F}"
 rm -f "${FILEPATH_F}"
