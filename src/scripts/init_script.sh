@@ -70,6 +70,13 @@ if [ ! "${EUID:-$(id -u)}" -eq 0 ]; then
     exit 1
 fi
 
+if [ "${1}" = "root" ]; then
+    echo "User argument must be a normal user, you provided ${1}"
+    echo "This script must be run as regular user using the command: sudo ./init_script.sh \"\${USER}\""
+    echo -e "${RED}Exiting.${NC}"
+    exit 1
+fi
+
 if [ ! -d "${HOME_USER_D}" ]; then
     echo "User ${1} doesn't exist, please check"
     echo "This script must be run as regular user with using command: sudo ./init_script.sh \"\${USER}\""
