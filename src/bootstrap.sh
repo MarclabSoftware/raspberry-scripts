@@ -21,6 +21,6 @@ for module in "${SCRIPT_DIR}"/tmp-scripts/*.module; do
     mv "${module}" "${SCRIPT_DIR}/tmp-scripts/${moduleDir}/${moduleName}"
 done
 
-"${SCRIPT_DIR}"/tmp-scripts/scripts/init_script.sh
+sudo "${SCRIPT_DIR}"/tmp-scripts/scripts/init_script.sh "${USER}"
 
 exit 0 # Important for later merge/split, do not remove
