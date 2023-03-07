@@ -115,8 +115,8 @@ if [ ! -f "${SCRIPT_HELPER_F}" ] || [[ $(<"${SCRIPT_HELPER_F}") == "0" ]]; then
         echo "WLAN Blocked"
     fi
 
-    # Limit log size
-    if check_config "CONFIG_INIT_LIMIT_JOURNAL"; then
+    # Journal - limit size
+    if check_config "CONFIG_INIT_JOURNAL_LIMIT"; then
         echo -e "\n\nLimit journal size"
         mkdir -p "${JOURNAL_CONF_D}"
         echo -e "Using SystemMaxUse=${CONFIG_INIT_JOURNAL_SYSTEM_MAX:-250M}\nSystemMaxFileSize=${CONFIG_INIT_JOURNAL_FILE_MAX:-50M}"
@@ -125,7 +125,7 @@ if [ ! -f "${SCRIPT_HELPER_F}" ] || [[ $(<"${SCRIPT_HELPER_F}") == "0" ]]; then
         echo "Journal size limited"
     fi
 
-    # Pacman
+    # Pacman - set mirrors
     if check_config "CONFIG_INIT_PACMAN_SET_MIRROR_COUNTRIES"; then
         echo -e "\n\nUpdating pacman mirrors"
         if command -v pacman-mirrors &>/dev/null; then
@@ -138,10 +138,12 @@ if [ ! -f "${SCRIPT_HELPER_F}" ] || [[ $(<"${SCRIPT_HELPER_F}") == "0" ]]; then
         fi
     fi
 
+    # Pacman - update
     echo -e "\n\nUpdating packages"
     pacman -Syyuu --noconfirm
     echo "Packages updated"
 
+    # Pacman - enable colored output
     if check_config "CONFIG_INIT_PACMAN_ENABLE_COLORS"; then
         echo -e "\n\nEnabling Pacman colored output"
         cp -a "${PACMAN_CONF_F}" "${PACMAN_CONF_F}.bak"
@@ -150,6 +152,7 @@ if [ ! -f "${SCRIPT_HELPER_F}" ] || [[ $(<"${SCRIPT_HELPER_F}") == "0" ]]; then
         echo -e "Pacman colored output enabled"
     fi
 
+    # Pacman - install packages
     if check_config "CONFIG_INIT_PACMAN_INSTALL_PACKAGES"; then
         if [[ -v CONFIG_INIT_PACMAN_PACKAGES[@] ]]; then
             echo -e "\n\nInstalling new packages"
@@ -162,6 +165,7 @@ if [ ! -f "${SCRIPT_HELPER_F}" ] || [[ $(<"${SCRIPT_HELPER_F}") == "0" ]]; then
         fi
     fi
 
+    # Pacman - cleanup
     echo -e "\n\nRemoving orphaned packages"
     pacman -Qtdq | pacman --noconfirm -Rns -
     echo "Orphaned packages removed"
@@ -171,7 +175,7 @@ if [ ! -f "${SCRIPT_HELPER_F}" ] || [[ $(<"${SCRIPT_HELPER_F}") == "0" ]]; then
     paccache -ruk0
     echo "Unneded cached packages removed"
 
-    # Rpi EEPROM Update
+    # Rpi - EEPROM update
     if check_config "CONFIG_INIT_EEPROM_BRANCH_CHANGE"; then
         echo -e "\n\nChanging Rpi EEPROM update channel to '${CONFIG_INIT_EEPROM_UPDATE_BRANCH:-stable}'"
         sed -i 's/FIRMWARE_RELEASE_STATUS=".*"/FIRMWARE_RELEASE_STATUS="'"${CONFIG_INIT_EEPROM_UPDATE_BRANCH:-stable}"'"/g' "${EEPROM_UPDATE_F}"
@@ -187,52 +191,7 @@ if [ ! -f "${SCRIPT_HELPER_F}" ] || [[ $(<"${SCRIPT_HELPER_F}") == "0" ]]; then
         read -n 1 -s -r -p "Press any key to continue"
     fi
 
-    # User & groups
-    if check_config "CONFIG_INIT_ADD_USER_TO_GROUPS"; then
-        if [[ -v CONFIG_INIT_GROUPS_TO_ADD[@] ]]; then
-            echo -e "\n\nAdding ${1} to ${CONFIG_INIT_GROUPS_TO_ADD[*]} groups"
-            for group in "${CONFIG_INIT_GROUPS_TO_ADD[@]}"; do
-                usermod -aG "${group}" "${1}"
-            done
-        else
-            echo "CONFIG_INIT_GROUPS_TO_ADD is not defined or is not an array"
-            read -n 1 -s -r -p "Press any key to continue"
-        fi
-    fi
-
-    # Nano
-    if check_config "CONFIG_INIT_NANO_ENABLE_SYNTAX_HIGHLIGHTING"; then
-        echo -e "\n\nEnabling Nano Syntax highlighting for root and ${1}"
-        if [ ! -f "${NANO_CONF_ROOT_F}" ] || ! grep -q 'include "/usr/share/nano/\*.nanorc' "${NANO_CONF_ROOT_F}"; then
-            echo -e 'include "/usr/share/nano/*.nanorc"\nset linenumbers' | tee -a "${NANO_CONF_ROOT_F}" >/dev/null
-        else
-            echo "${NANO_CONF_ROOT_F} already configured"
-            read -n 1 -s -r -p "Press any key to continue"
-        fi
-        if [ ! -f "${NANO_CONF_USER_F}" ] || ! grep -q 'include "/usr/share/nano/\*.nanorc' "${NANO_CONF_USER_F}"; then
-            echo -e 'include "/usr/share/nano/*.nanorc"\nset linenumbers' | sudo -u "${1}" tee -a "${NANO_CONF_USER_F}" >/dev/null
-        else
-            echo "${NANO_CONF_USER_F} already configured"
-            read -n 1 -s -r -p "Press any key to continue"
-        fi
-        echo -e "\nNano Syntax highlighting enabled"
-    fi
-
-    # Sudoers
-    if check_config "CONFIG_INIT_SUDO_WITHOUT_PWD"; then
-        echo -e "\n\nSetting sudo without password for ${1}"
-        if [ ! -f "${SUDOERS_F}" ]; then
-            echo "${SUDOERS_F} doesn't exist."
-            echo "${1} ALL=(ALL) NOPASSWD: ALL" | tee "${SUDOERS_F}" >/dev/null
-            chmod 750 "${SUDOERS_F}"
-            echo "${1} can run sudo without password from the next boot."
-        else
-            echo "${SUDOERS_F} already exists, please check"
-            read -n 1 -s -r -p "Press any key to continue"
-        fi
-    fi
-
-    # Overclock
+    # Rpi - Overclock
     if check_config "CONFIG_INIT_ENABLE_OVERCLOCK"; then
         echo -e "\n\nSetting overclock"
         if ! grep -q "# Overclock-${1}" "${BOOT_CONF_F}"; then
@@ -251,7 +210,52 @@ if [ ! -f "${SCRIPT_HELPER_F}" ] || [[ $(<"${SCRIPT_HELPER_F}") == "0" ]]; then
         fi
     fi
 
-    # Sysctl network confs
+    # Add user to groups
+    if check_config "CONFIG_INIT_ADD_USER_TO_GROUPS"; then
+        if [[ -v CONFIG_INIT_GROUPS_TO_ADD[@] ]]; then
+            echo -e "\n\nAdding ${1} to ${CONFIG_INIT_GROUPS_TO_ADD[*]} groups"
+            for group in "${CONFIG_INIT_GROUPS_TO_ADD[@]}"; do
+                usermod -aG "${group}" "${1}"
+            done
+        else
+            echo "CONFIG_INIT_GROUPS_TO_ADD is not defined or is not an array"
+            read -n 1 -s -r -p "Press any key to continue"
+        fi
+    fi
+
+    # Nano - enable syntax highlighting
+    if check_config "CONFIG_INIT_NANO_ENABLE_SYNTAX_HIGHLIGHTING"; then
+        echo -e "\n\nEnabling Nano Syntax highlighting for root and ${1}"
+        if [ ! -f "${NANO_CONF_ROOT_F}" ] || ! grep -q 'include "/usr/share/nano/\*.nanorc' "${NANO_CONF_ROOT_F}"; then
+            echo -e 'include "/usr/share/nano/*.nanorc"\nset linenumbers' | tee -a "${NANO_CONF_ROOT_F}" >/dev/null
+        else
+            echo "${NANO_CONF_ROOT_F} already configured"
+            read -n 1 -s -r -p "Press any key to continue"
+        fi
+        if [ ! -f "${NANO_CONF_USER_F}" ] || ! grep -q 'include "/usr/share/nano/\*.nanorc' "${NANO_CONF_USER_F}"; then
+            echo -e 'include "/usr/share/nano/*.nanorc"\nset linenumbers' | sudo -u "${1}" tee -a "${NANO_CONF_USER_F}" >/dev/null
+        else
+            echo "${NANO_CONF_USER_F} already configured"
+            read -n 1 -s -r -p "Press any key to continue"
+        fi
+        echo -e "\nNano Syntax highlighting enabled"
+    fi
+
+    # Sudo without password
+    if check_config "CONFIG_INIT_SUDO_WITHOUT_PWD"; then
+        echo -e "\n\nSetting sudo without password for ${1}"
+        if [ ! -f "${SUDOERS_F}" ]; then
+            echo "${SUDOERS_F} doesn't exist."
+            echo "${1} ALL=(ALL) NOPASSWD: ALL" | tee "${SUDOERS_F}" >/dev/null
+            chmod 750 "${SUDOERS_F}"
+            echo "${1} can run sudo without password from the next boot."
+        else
+            echo "${SUDOERS_F} already exists, please check"
+            read -n 1 -s -r -p "Press any key to continue"
+        fi
+    fi
+
+    # Network - optimizationss
     if check_config "CONFIG_INIT_NETWORK_OPTIMIZATIONS"; then
         echo -e "\n\nAdding network confs to ${NETWORK_SYSCTL_CONF_F}"
         echo \
@@ -263,13 +267,14 @@ net.core.wmem_max = 8388608" | tee -a "${NETWORK_SYSCTL_CONF_F}" >/dev/null
         echo "Network optimizations done"
     fi
 
+    # Network - enable routing
     if check_config "CONFIG_INIT_NETWORK_ROUTING_ENABLE"; then
         echo -e "\n\nAdding network confs to ${NETWORK_SYSCTL_CONF_F}"
         echo "net.ipv4.ip_forward = 1" | tee -a "${NETWORK_SYSCTL_CONF_F}" >/dev/null
         echo "Routing enabled"
     fi
 
-    # SSD Trim
+    # SSD - enable trim
     if check_config "CONFIG_INIT_TRIM_ENABLE"; then
         echo -e "\n\nAdding fstrim conf to ${TRIM_RULES_F}"
         echo "Configured vendor: ${CONFIG_INIT_TRIM_VENDOR:-04e8} | product: ${CONFIG_INIT_TRIM_PRODUCT:-61f5}"
@@ -283,7 +288,7 @@ net.core.wmem_max = 8388608" | tee -a "${NETWORK_SYSCTL_CONF_F}" >/dev/null
         echo "Trim enabled"
     fi
 
-    # NTP
+    # NTP - custom config
     if check_config "CONFIG_INIT_NTP_CUSOMIZATION"; then
         if systemctl is-active --quiet systemd-timesyncd; then
             echo -e "\n\nTimesyncd setup"
