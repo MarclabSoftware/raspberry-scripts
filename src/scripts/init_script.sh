@@ -1,15 +1,44 @@
 #!/usr/bin/env bash
 
+check_config() {
+    # Return 0 as true, 1 as false, any other number as error.
+    if [ $# -eq 0 ]; then
+        echo "${BASH_SOURCE[$i + 1]}:${BASH_LINENO[$i]} - ${FUNCNAME[$i]}: no arguments supplied"
+        return 2
+    fi
+    if [ "${!1}" = true ]; then
+        return 0 # True
+    fi
+    if [ "${!1}" = false ]; then
+        return 1 # False
+    fi
+    if [ -z ${!1+x} ] || [ "${!1}" = "ask" ]; then
+        read -p "Do you want to apply init config for ${1}? Y/N: " -n 1 -r
+        echo
+        if [[ $REPLY =~ ^[Yy]$ ]]; then
+            return 0 # True
+        else
+            return 1 # False
+        fi
+    fi
+    echo "${BASH_SOURCE[$i + 1]}:${BASH_LINENO[$i]} - ${FUNCNAME[$i]}: config error for ${1}: wrong value, current value: ${!1}, possible values are true,false,ask"
+    return 3
+}
+
 # Bash colors
 RED='\033[0;31m'   # Red color
 GREEN='\033[0;32m' # Green color
 NC='\033[0m'       # No color
 
-# Constants, don't touch them
+# Script related vars
+SCRIPT_D=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" &>/dev/null && pwd)
+SCRIPT_NAME=$(basename "$(readlink -f "${0}")" .sh)
+CONFIG_F="${SCRIPT_D}/${SCRIPT_NAME}.conf"
+
+# Constants
 HOME_USER_D="/home/${1}"
 HOME_ROOT_D="/root"
-SCRIPT_HELPER_PASS_1_F="${HOME_USER_D}/.init_script_pass1_ok"
-SCRIPT_HELPER_PASS_2_F="${HOME_USER_D}/.init_script_pass2_ok"
+SCRIPT_HELPER_F="${HOME_USER_D}/.init_script_pass1_ok"
 JOURNAL_CONF_D="/etc/systemd/journald.conf.d"
 SUDOERS_F="/etc/sudoers.d/11-${1}"
 BOOT_CONF_F="/boot/config.txt"
@@ -38,34 +67,10 @@ DHCPD_CONF_F="/etc/dhcpcd.conf"
 TIMESYNCD_CONFS_D="/etc/systemd/timesyncd.conf.d"
 TIMESYNCD_CONF_F="${TIMESYNCD_CONFS_D}/timesyncd-${1}.conf"
 
-# Configurable variables
-JOURNAL_SYSTEM_MAX="250M"
-JOURNAL_FILE_MAX="50M"
-PACMAN_MIRRORS_COUNTRIES="Italy,Global,Germany,Switzerland,Czechia,France,Netherlands,Austria"
-PACMAN_PACKAGES=("htop" "git" "unzip" "docker" "docker-compose" "python-pip" "bluez" "bluez-utils" "base-devel")
-GROUPS_TO_ADD=("docker" "tty" "uucp" "lp")
-LAN_INTERFACE="end0"
-EEPROM_UPDATE_BRANCH="stable"
-DNS_FIRST_PASS="8.8.8.8" #"1.1.1.1"
-DNS_SECOND_PASS="127.0.0.1"
-FALLBACK_DNS="8.8.4.4" #"127.0.0.1:5335 192.168.21.1"
-DNS_SEC_FIRST_PASS="no"
-DNS_SEC_SECOND_PASS="yes"
-NTP_SERVERS="192.168.21.1"
-FALLBACK_NTP_SERVERS="time.cloudflare.com 193.204.114.232 193.204.114.233"
-MACVLAN_STATIC_IP="192.168.45.193"
-MACVLAN_RANGE="192.168.45.224/27"
-MACVLAN_SUBNET="192.168.45.0/24"
-MACVLAN_GATEWAY="192.168.45.1"
-BACKUP_F="${HOME_USER_D}/backup.tar.gz"
-SSH_USEFUL_HOSTS=("github.com" "gitlab.com" "bitbucket.org" "ssh.dev.azure.com" "vs-ssh.visualstudio.com")
-SSD_VENDOR="04e8"  # lsusb to find it
-SSD_PRODUCT="61f5" # lsusb to find it
-
 # Safety checks
 if [ ! "${EUID:-$(id -u)}" -eq 0 ]; then
-    echo "Please run as root/sudo"
-    echo "This script must be run as regular user using the command: sudo ./init_script.sh \"\${USER}\""
+    echo "Please run as root"
+    echo "This script must be run as super user using the command: sudo ./init_script.sh \"\${USER}\""
     echo -e "${RED}Exiting.${NC}"
     exit 1
 fi
@@ -84,140 +89,224 @@ if [ ! -d "${HOME_USER_D}" ]; then
     exit 2
 fi
 
-if [ -f "${SCRIPT_HELPER_PASS_1_F}" ] && [ -f "${SCRIPT_HELPER_PASS_2_F}" ]; then
-    echo "All config already done, exiting."
-    exit 3
+if [ -f "${SCRIPT_HELPER_F}" ]; then
+    if [[ $(<"${SCRIPT_HELPER_F}") == "2" ]]; then
+        echo "All config already done, exiting."
+        exit 3
+    fi
 fi
 
-if [ ! -f "${SCRIPT_HELPER_PASS_1_F}" ] && [ -f "${SCRIPT_HELPER_PASS_2_F}" ]; then
-    echo "${SCRIPT_HELPER_PASS_2_F} found, but ${SCRIPT_HELPER_PASS_1_F} doesn't exist, very strange, exiting."
-    exit 4
+# Import config file
+if [ -f "${CONFIG_F}" ]; then
+    echo "Config file found... importing it"
+    source "${CONFIG_F}"
+else
+    echo "Config file not found... proceeding to manual config"
 fi
 
 # First pass
-if [ ! -f "${SCRIPT_HELPER_PASS_1_F}" ] && [ ! -f "${SCRIPT_HELPER_PASS_2_F}" ]; then
+if [ ! -f "${SCRIPT_HELPER_F}" ] || [[ $(<"${SCRIPT_HELPER_F}") == "0" ]]; then
     echo "First init pass"
 
     # Block WLAN
-    echo -e "\nBlocking WLAN"
-    rfkill block wlan
-    echo "WLAN Blocked"
+    if check_config "CONFIG_INIT_BLOCK_WLAN"; then
+        echo -e "\nBlocking WLAN"
+        rfkill block wlan
+        echo "WLAN Blocked"
+    fi
 
     # Limit log size
-    echo -e "\n\nLimit journal size"
-    mkdir -p "${JOURNAL_CONF_D}"
-    echo -e "[Journal]\nSystemMaxUse=${JOURNAL_SYSTEM_MAX}\nSystemMaxFileSize=${JOURNAL_FILE_MAX}" | tee "${JOURNAL_CONF_D}/size.conf" >/dev/null
+    if check_config "CONFIG_INIT_LIMIT_JOURNAL"; then
+        echo -e "\n\nLimit journal size"
+        mkdir -p "${JOURNAL_CONF_D}"
+        echo -e "Using SystemMaxUse=${CONFIG_INIT_JOURNAL_SYSTEM_MAX:-250M}\nSystemMaxFileSize=${CONFIG_INIT_JOURNAL_FILE_MAX:-50M}"
+        echo -e "[Journal]\nSystemMaxUse=${CONFIG_INIT_JOURNAL_SYSTEM_MAX:-250M}\nSystemMaxFileSize=${CONFIG_INIT_JOURNAL_FILE_MAX:-50M}" | tee "${JOURNAL_CONF_D}/size.conf" >/dev/null
+        echo "New conf file is located at ${JOURNAL_CONF_D}/size.conf"
+        echo "Journal size limited"
+    fi
 
     # Pacman
-    echo -e "\n\nUpdating pacman mirrors"
-    pacman-mirrors --country "${PACMAN_MIRRORS_COUNTRIES}"
+    if check_config "CONFIG_INIT_PACMAN_SET_MIRROR_COUNTRIES"; then
+        echo -e "\n\nUpdating pacman mirrors"
+        if command -v pacman-mirrors &>/dev/null; then
+            echo "Using ${CONFIG_INIT_PACMAN_MIRRORS_COUNTRIES:-Global} as mirrors"
+            pacman-mirrors --country "${CONFIG_INIT_PACMAN_MIRRORS_COUNTRIES:-Global}"
+            echo "Pacman mirrors updated"
+        else
+            echo "Missing pacman-mirrors command"
+            read -n 1 -s -r -p "Press any key to continue"
+        fi
+    fi
 
     echo -e "\n\nUpdating packages"
     pacman -Syyuu --noconfirm
+    echo "Packages updated"
 
-    echo -e "\n\nInstalling new packages"
-    pacman -S --noconfirm --needed "${PACMAN_PACKAGES[@]}"
+    if check_config "CONFIG_INIT_PACMAN_ENABLE_COLORS"; then
+        echo -e "\n\nEnabling Pacman colored output"
+        cp -a "${PACMAN_CONF_F}" "${PACMAN_CONF_F}.bak"
+        echo "Pacman config file backed up at ${PACMAN_CONF_F}.bak"
+        sed -i 's/#Color/Color\nILoveCandy/g' "${PACMAN_CONF_F}"
+        echo -e "Pacman colored output enabled"
+    fi
+
+    if check_config "CONFIG_INIT_PACMAN_INSTALL_PACKAGES"; then
+        if [[ -v CONFIG_INIT_PACMAN_PACKAGES[@] ]]; then
+            echo -e "\n\nInstalling new packages"
+            echo "New packages to install: ${CONFIG_INIT_PACMAN_PACKAGES[*]}"
+            pacman -S --noconfirm --needed "${CONFIG_INIT_PACMAN_PACKAGES[*]}"
+            echo "New packages installed"
+        else
+            echo "CONFIG_INIT_PACMAN_PACKAGES is not defined or is not an array"
+            read -n 1 -s -r -p "Press any key to continue"
+        fi
+    fi
 
     echo -e "\n\nRemoving orphaned packages"
     pacman -Qtdq | pacman --noconfirm -Rns -
+    echo "Orphaned packages removed"
 
     echo -e "\n\nRemoving unneded cached packages"
     paccache -rk1
     paccache -ruk0
-
-    echo -e "\n\nEnabling Pacman colored output"
-    cp -a "${PACMAN_CONF_F}" "${PACMAN_CONF_F}.bak"
-    echo "Pacman config file backed up at ${PACMAN_CONF_F}.bak"
-    sed -i 's/#Color/Color\nILoveCandy/g' "${PACMAN_CONF_F}"
-    echo -e "\nPacman colored output enabled"
+    echo "Unneded cached packages removed"
 
     # Rpi EEPROM Update
-    echo -e "\n\nChanging Rpi EEPROM update channel to '${EEPROM_UPDATE_BRANCH}'"
-    sed -i 's/FIRMWARE_RELEASE_STATUS=".*"/FIRMWARE_RELEASE_STATUS="'"${EEPROM_UPDATE_BRANCH}"'"/g' "${EEPROM_UPDATE_F}"
-    echo -e "\nRpi EEPROM update channel changed to '${EEPROM_UPDATE_BRANCH}'"
+    if check_config "CONFIG_INIT_EEPROM_BRANCH_CHANGE"; then
+        echo -e "\n\nChanging Rpi EEPROM update channel to '${CONFIG_INIT_EEPROM_UPDATE_BRANCH:-stable}'"
+        sed -i 's/FIRMWARE_RELEASE_STATUS=".*"/FIRMWARE_RELEASE_STATUS="'"${CONFIG_INIT_EEPROM_UPDATE_BRANCH:-stable}"'"/g' "${EEPROM_UPDATE_F}"
+        echo "Rpi EEPROM update channel changed"
+    fi
 
     echo -e "\n\nChecking for Rpi EEPROM updates"
-    rpi-eeprom-update -d -a
+    if command -v rpi-eeprom-update &>/dev/null; then
+        rpi-eeprom-update -d -a
+        echo "Rpi EEPROM updates checked"
+    else
+        echo "rpi-eeprom-update command missing"
+        read -n 1 -s -r -p "Press any key to continue"
+    fi
 
     # User & groups
-    echo -e "\n\nAdding ${1} to ${GROUPS_TO_ADD[*]} groups"
-    for group in "${GROUPS_TO_ADD[@]}"; do
-        usermod -aG "${group}" "${1}"
-    done
+    if check_config "CONFIG_INIT_ADD_USER_TO_GROUPS"; then
+        if [[ -v CONFIG_INIT_GROUPS_TO_ADD[@] ]]; then
+            echo -e "\n\nAdding ${1} to ${CONFIG_INIT_GROUPS_TO_ADD[*]} groups"
+            for group in "${CONFIG_INIT_GROUPS_TO_ADD[@]}"; do
+                usermod -aG "${group}" "${1}"
+            done
+        else
+            echo "CONFIG_INIT_GROUPS_TO_ADD is not defined or is not an array"
+            read -n 1 -s -r -p "Press any key to continue"
+        fi
+    fi
 
     # Nano
-    echo -e "\n\nEnabling Nano Syntax highlighting for root and ${1}"
-    if [ ! -f "${NANO_CONF_ROOT_F}" ] || ! grep -q 'include "/usr/share/nano/\*.nanorc' "${NANO_CONF_ROOT_F}"; then
-        echo -e 'include "/usr/share/nano/*.nanorc"\nset linenumbers' | tee -a "${NANO_CONF_ROOT_F}" >/dev/null
-    else
-        echo "${NANO_CONF_ROOT_F} already configured"
+    if check_config "CONFIG_INIT_NANO_ENABLE_SYNTAX_HIGHLIGHTING"; then
+        echo -e "\n\nEnabling Nano Syntax highlighting for root and ${1}"
+        if [ ! -f "${NANO_CONF_ROOT_F}" ] || ! grep -q 'include "/usr/share/nano/\*.nanorc' "${NANO_CONF_ROOT_F}"; then
+            echo -e 'include "/usr/share/nano/*.nanorc"\nset linenumbers' | tee -a "${NANO_CONF_ROOT_F}" >/dev/null
+        else
+            echo "${NANO_CONF_ROOT_F} already configured"
+            read -n 1 -s -r -p "Press any key to continue"
+        fi
+        if [ ! -f "${NANO_CONF_USER_F}" ] || ! grep -q 'include "/usr/share/nano/\*.nanorc' "${NANO_CONF_USER_F}"; then
+            echo -e 'include "/usr/share/nano/*.nanorc"\nset linenumbers' | sudo -u "${1}" tee -a "${NANO_CONF_USER_F}" >/dev/null
+        else
+            echo "${NANO_CONF_USER_F} already configured"
+            read -n 1 -s -r -p "Press any key to continue"
+        fi
+        echo -e "\nNano Syntax highlighting enabled"
     fi
-    if [ ! -f "${NANO_CONF_USER_F}" ] || ! grep -q 'include "/usr/share/nano/\*.nanorc' "${NANO_CONF_USER_F}"; then
-        echo -e 'include "/usr/share/nano/*.nanorc"\nset linenumbers' | sudo -u "${1}" tee -a "${NANO_CONF_USER_F}" >/dev/null
-    else
-        echo "${NANO_CONF_USER_F} already configured"
-    fi
-    echo -e "\nNano Syntax highlighting enabled"
 
     # Sudoers
-    echo -e "\n\nSetting sudo without password for ${1}"
-    if [ ! -f "${SUDOERS_F}" ]; then
-        echo "${SUDOERS_F} doesn't exist."
-        echo "${1} ALL=(ALL) NOPASSWD: ALL" | tee "${SUDOERS_F}" >/dev/null
-        chmod 750 "${SUDOERS_F}"
-        echo "${1} can run sudo without password from the next boot."
-    else
-        echo "${SUDOERS_F} already exists, please check"
+    if check_config "CONFIG_INIT_SUDO_WITHOUT_PWD"; then
+        echo -e "\n\nSetting sudo without password for ${1}"
+        if [ ! -f "${SUDOERS_F}" ]; then
+            echo "${SUDOERS_F} doesn't exist."
+            echo "${1} ALL=(ALL) NOPASSWD: ALL" | tee "${SUDOERS_F}" >/dev/null
+            chmod 750 "${SUDOERS_F}"
+            echo "${1} can run sudo without password from the next boot."
+        else
+            echo "${SUDOERS_F} already exists, please check"
+            read -n 1 -s -r -p "Press any key to continue"
+        fi
     fi
 
     # Overclock
-#     echo -e "\n\nSetting overclock"
-#     if ! grep -q "# Overclock-${1}" "${BOOT_CONF_F}"; then
-#         echo "Overclock config not found"
-#         cp -a "${BOOT_CONF_F}" "${BOOT_CONF_F}.bak"
-#         echo "Boot config file backed up at ${BOOT_CONF_F}.bak"
-#         echo \
-#             "# Overclock-${1}
-# over_voltage=6
-# arm_freq=2000
-# #gpu_freq=750" | tee -a "${BOOT_CONF_F}" >/dev/null
-#         echo -e "Overclock will be applied at the next boot."
-#     fi
+    if check_config "CONFIG_INIT_ENABLE_OVERCLOCK"; then
+        echo -e "\n\nSetting overclock"
+        if ! grep -q "# Overclock-${1}" "${BOOT_CONF_F}"; then
+            echo "Overclock config not found"
+            cp -a "${BOOT_CONF_F}" "${BOOT_CONF_F}.bak"
+            echo "Boot config file backed up at ${BOOT_CONF_F}.bak"
+            echo \
+                "# Overclock-${1}
+    over_voltage=${CONFIG_INIT_OVERCLOCK_OVER_VOLTAGE:-6}
+    arm_freq=${CONFIG_INIT_OVERCLOCK_ARM_FREQ:-2000}
+    gpu_freq=${CONFIG_INIT_OVERCLOCK_ARM_FREQ:-750}" | tee -a "${BOOT_CONF_F}" >/dev/null
+            echo "Overclock will be applied at the next boot"
+        else
+            echo "Overclock config is already present in ${BOOT_CONF_F}, please check"
+            read -n 1 -s -r -p "Press any key to continue"
+        fi
+    fi
 
-    # Sysctl
-    echo -e "\n\nAdding network confs to ${NETWORK_SYSCTL_CONF_F}"
-    echo \
-        "# Improve Network performance
+    # Sysctl network confs
+    if check_config "CONFIG_INIT_NETWORK_OPTIMIZATIONS"; then
+        echo -e "\n\nAdding network confs to ${NETWORK_SYSCTL_CONF_F}"
+        echo \
+            "# Improve Network performance
 # This sets the max OS receive buffer size for all types of connections.
 net.core.rmem_max = 8388608
 # This sets the max OS send buffer size for all types of connections.
-net.core.wmem_max = 8388608
+net.core.wmem_max = 8388608" | tee -a "${NETWORK_SYSCTL_CONF_F}" >/dev/null
+        echo "Network optimizations done"
+    fi
 
-# Enable routing (eg: for wireguard)
-net.ipv4.ip_forward = 1" | tee "${NETWORK_SYSCTL_CONF_F}" >/dev/null
+    if check_config "CONFIG_INIT_NETWORK_ROUTING_ENABLE"; then
+        echo -e "\n\nAdding network confs to ${NETWORK_SYSCTL_CONF_F}"
+        echo "net.ipv4.ip_forward = 1" | tee -a "${NETWORK_SYSCTL_CONF_F}" >/dev/null
+        echo "Routing enabled"
+    fi
 
     # SSD Trim
-    # echo -e "\n\nAdding fstrim confs for samsung T5 USB SSD to ${TRIM_RULES_F}"
-    # echo -e 'ACTION=="add|change", ATTRS{idVendor}=="'${SSD_VENDOR}'", ATTRS{idProduct}=="'${SSD_PRODUCT}'", SUBSYSTEM=="scsi_disk", ATTR{provisioning_mode}="unmap"' | tee "${TRIM_RULES_F}" >/dev/null
-    # udevadm control --reload-rules
-    # udevadm trigger
-    # fstrim -av
-    # systemctl enable --now fstrim.timer
+    if check_config "CONFIG_INIT_TRIM_ENABLE"; then
+        echo -e "\n\nAdding fstrim conf to ${TRIM_RULES_F}"
+        echo "Configured vendor: ${CONFIG_INIT_TRIM_VENDOR:-04e8} | product: ${CONFIG_INIT_TRIM_PRODUCT:-61f5}"
+        echo "Please check with command lsusb if they are correct for your SSD device"
+        echo -e 'ACTION=="add|change", ATTRS{idVendor}=="'${CONFIG_INIT_TRIM_VENDOR:-04e8}'", ATTRS{idProduct}=="'${CONFIG_INIT_TRIM_PRODUCT:-61f5}'", SUBSYSTEM=="scsi_disk", ATTR{provisioning_mode}="unmap"' | tee "${TRIM_RULES_F}" >/dev/null
+        udevadm control --reload-rules
+        udevadm trigger
+        fstrim -av
+        systemctl enable --now fstrim.timer
+        echo "Trim enabled"
+    fi
 
     # NTP
-#     echo -e "\n\nTimesyncd setup"
-#     mkdir -p "${TIMESYNCD_CONFS_D}"
-#     echo \
-#         "# See timesyncd.conf(5) for details.
-# [Time]
-# NTP=${NTP_SERVERS}
-# FallbackNTP=${FALLBACK_NTP_SERVERS}
-# #RootDistanceMaxSec=5
-# #PollIntervalMinSec=32
-# #PollIntervalMaxSec=2048
-# #ConnectionRetrySec=30
-# #SaveIntervalSec=60" | tee "${TIMESYNCD_CONF_F}" >/dev/null
-#     systemctl restart systemd-timesyncd
+    if check_config "CONFIG_INIT_NTP_CUSOMIZATION"; then
+        if systemctl is-active --quiet systemd-timesyncd; then
+            echo -e "\n\nTimesyncd setup"
+            echo "NTP server: ${CONFIG_INIT_NTP_SERVERS:-time.cloudflare.com}"
+            echo "NTP fallback server: ${CONFIG_INIT_NTP_FALLBACK_SERVERS:-pool.ntp.org}"
+            mkdir -p "${TIMESYNCD_CONFS_D}"
+            echo \
+                "# See timesyncd.conf(5) for details.
+[Time]
+NTP=${CONFIG_INIT_NTP_SERVERS:-time.cloudflare.com}
+FallbackNTP=${CONFIG_INIT_NTP_FALLBACK_SERVERS:-pool.ntp.org}
+#RootDistanceMaxSec=5
+#PollIntervalMinSec=32
+#PollIntervalMaxSec=2048
+#ConnectionRetrySec=30
+#SaveIntervalSec=60" | tee "${TIMESYNCD_CONF_F}" >/dev/null
+            systemctl restart systemd-timesyncd
+            echo "Timesyncd setup done"
+        else
+            echo "systemd-timesyncd is not running, maybe this OS is not using it for timesync, config not applied, please check"
+            read -n 1 -s -r -p "Press any key to continue"
+        fi
+
+    fi
 
     # SSH
     # echo -e "\n\nAdding ssh user configs"
