@@ -38,7 +38,7 @@ CONFIG_F="${SCRIPT_D}/${SCRIPT_NAME}.conf"
 # Constants
 HOME_USER_D="/home/${1}"
 HOME_ROOT_D="/root"
-SCRIPT_HELPER_F="${HOME_USER_D}/.init_script_pass1_ok"
+SCRIPT_HELPER_F="${HOME_USER_D}/.init_script_progress"
 JOURNAL_CONF_D="/etc/systemd/journald.conf.d"
 SUDOERS_F="/etc/sudoers.d/11-${1}"
 BOOT_CONF_F="/boot/config.txt"
@@ -274,7 +274,8 @@ net.core.wmem_max = 8388608" | tee -a "${NETWORK_SYSCTL_CONF_F}" >/dev/null
         echo -e "\n\nAdding fstrim conf to ${TRIM_RULES_F}"
         echo "Configured vendor: ${CONFIG_INIT_TRIM_VENDOR:-04e8} | product: ${CONFIG_INIT_TRIM_PRODUCT:-61f5}"
         echo "Please check with command lsusb if they are correct for your SSD device"
-        echo -e 'ACTION=="add|change", ATTRS{idVendor}=="'${CONFIG_INIT_TRIM_VENDOR:-04e8}'", ATTRS{idProduct}=="'${CONFIG_INIT_TRIM_PRODUCT:-61f5}'", SUBSYSTEM=="scsi_disk", ATTR{provisioning_mode}="unmap"' | tee "${TRIM_RULES_F}" >/dev/null
+        read -n 1 -s -r -p "Press any key to continue"
+        echo -e 'ACTION=="add|change", ATTRS{idVendor}=="'"${CONFIG_INIT_TRIM_VENDOR:-04e8}"'", ATTRS{idProduct}=="'"${CONFIG_INIT_TRIM_PRODUCT:-61f5}"'", SUBSYSTEM=="scsi_disk", ATTR{provisioning_mode}="unmap"' | tee "${TRIM_RULES_F}" >/dev/null
         udevadm control --reload-rules
         udevadm trigger
         fstrim -av
@@ -443,7 +444,7 @@ noipv6" | tee -a "${DHCPD_CONF_F}" >/dev/null
     # echo "Filesystem optimizations done"
 
     # Pass 1 done
-    sudo -u "${1}" touch "${SCRIPT_HELPER_PASS_1_F}"
+    echo "1" | sudo -u "${1}" tee "${SCRIPT_HELPER_F}"
     echo -e "\n\nFirst part of the config done"
     echo "Please check sshd config using 'sudo sshd -t' command and fix any problem before rebooting"
     echo "If the command sudo sshd -t has no output the config is ok"
@@ -452,7 +453,7 @@ noipv6" | tee -a "${DHCPD_CONF_F}" >/dev/null
 fi
 
 # Second pass
-if [ -f "${SCRIPT_HELPER_PASS_1_F}" ] && [ ! -f "${SCRIPT_HELPER_PASS_2_F}" ]; then
+if [ -f "${SCRIPT_HELPER_F}" ] && [[ $(<"${SCRIPT_HELPER_F}") == "1" ]]; then
     echo "Second init pass"
 
     # Docker login
@@ -477,7 +478,7 @@ if [ -f "${SCRIPT_HELPER_PASS_1_F}" ] && [ ! -f "${SCRIPT_HELPER_PASS_2_F}" ]; t
         sudo -u "${1}" docker compose -f "${HOME_USER_D}/docker/docker-compose.yml" up -d
         echo -e "\nPortainer should be up and running, start other stacks from there"
     fi
-    sudo -u "${1}" touch "${SCRIPT_HELPER_PASS_2_F}"
+    echo "2" | sudo -u "${1}" tee "${SCRIPT_HELPER_F}"
     echo -e "\n\nSecond part of the config done"
     exit 0
 fi
