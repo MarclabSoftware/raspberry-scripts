@@ -37,7 +37,6 @@ check_config() {
     fi
 }
 
-
 # Bash colors
 RED='\033[0;31m'   # Red color
 GREEN='\033[0;32m' # Green color
@@ -106,13 +105,6 @@ if [ ! -d "${HOME_USER_D}" ]; then
     exit 2
 fi
 
-if [ -f "${SCRIPT_HELPER_F}" ]; then
-    if [[ $(<"${SCRIPT_HELPER_F}") == "2" ]]; then
-        echo "All config already done, exiting."
-        exit 3
-    fi
-fi
-
 # Import config file
 if [ -f "${CONFIG_F}" ]; then
     echo "Config file found... importing it"
@@ -121,8 +113,20 @@ else
     echo "Config file not found... proceeding to manual config"
 fi
 
+# Create helper file if not found
+if [ ! -f "${SCRIPT_HELPER_F}" ]; then
+    echo "0" | sudo -u "${1}" tee "${SCRIPT_HELPER_F}" >/dev/null
+fi
+
+helper_f_content=$(<"${SCRIPT_HELPER_F}")
+
+if [[ "${helper_f_content}" == "2" ]]; then
+    echo "All config already done, exiting."
+    exit 3
+
 # First pass
-if [ ! -f "${SCRIPT_HELPER_F}" ] || [[ $(<"${SCRIPT_HELPER_F}") == "0" ]]; then
+elif [[ "${helper_f_content}" == "0" ]]; then
+
     echo -e "\nFirst init pass"
 
     # Block WLAN
@@ -509,10 +513,9 @@ DNSStubListener=no
     echo "If the command sudo sshd -t has no output the config is ok"
     echo "Reboot and run this script again to finalize the configuration"
     exit 0
-fi
 
 # Second pass
-if [[ $(<"${SCRIPT_HELPER_F}") == "1" ]]; then
+elif [[ "${helper_f_content}" == "1" ]]; then
     echo "Second init pass"
 
     # Docker - login
