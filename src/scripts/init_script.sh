@@ -1,30 +1,35 @@
 #!/usr/bin/env bash
 
+# Check if a configuration var exists
+# The argument to use is the name of the var, not the var itself
+# If it exists and its value is true or false: returns the value (true=0 false=1)
+# If it doesn't exist, or if it's value is 'ask': configures it on the fly as boolean and returns the result
+# If it exists  and its value is any other value: returns >1 values as error
 check_config() {
-    # Return 0 as true, 1 as false, any other number as error.
     if [ $# -eq 0 ]; then
         echo "${BASH_SOURCE[$i + 1]}:${BASH_LINENO[$i]} - ${FUNCNAME[$i]}: no arguments supplied"
         return 2
     fi
     if [ "${!1}" = true ]; then
-        return 0 # True
+        return 0
     fi
     if [ "${!1}" = false ]; then
-        return 1 # False
+        return 1
     fi
     if [ -z ${!1+x} ] || [ "${!1}" = "ask" ]; then
         read -p "Do you want to apply init config for ${1}? Y/N: " -n 1 -r
         echo
         if [[ $REPLY =~ ^[Yy]$ ]]; then
-            return 0 # True
+            return 0
         else
-            return 1 # False
+            return 1
         fi
     fi
     echo "${BASH_SOURCE[$i + 1]}:${BASH_LINENO[$i]} - ${FUNCNAME[$i]}: config error for ${1}: wrong value, current value: ${!1}, possible values are true,false,ask"
     return 3
 }
 
+# Press any key to continue
 paktc() {
     echo
     read -n 1 -s -r -p "Press any key to continue"
