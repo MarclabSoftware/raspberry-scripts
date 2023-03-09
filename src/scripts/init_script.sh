@@ -51,6 +51,9 @@ HOME_USER_D="/home/${1}"
 HOME_ROOT_D="/root"
 SCRIPT_HELPER_F="${HOME_USER_D}/.init_script_progress"
 JOURNAL_CONF_D="/etc/systemd/journald.conf.d"
+SYSCTLD_D="/etc/sysctl.d"
+SYSCTLD_NETWORK_CONF_F="${SYSCTLD_D}/21-${1}_network.conf"
+SYSCTLD_SWAPPINESS_CONF_F="${SYSCTLD_D}/22-${1}_swappiness.conf"
 SUDOERS_F="/etc/sudoers.d/11-${1}"
 BOOT_CONF_F="/boot/config.txt"
 BOOT_CMDLINE_F="/boot/cmdline.txt"
@@ -59,7 +62,6 @@ NANO_CONF_USER_F="${HOME_USER_D}/${NANO_CONF_F}"
 NANO_CONF_ROOT_F="${HOME_ROOT_D}/${NANO_CONF_F}"
 PACMAN_CONF_F="/etc/pacman.conf"
 EEPROM_UPDATE_F="/etc/default/rpi-eeprom-update"
-NETWORK_SYSCTL_CONF_F="/etc/sysctl.d/21-${1}_network.conf"
 TRIM_RULES_F="/etc/udev/rules.d/11-trim_samsung.rules"
 RESOLVED_CONFS_D="/etc/systemd/resolved.conf.d"
 RESOLVED_CONF_F="${RESOLVED_CONFS_D}/resolved-${1}.conf"
@@ -134,6 +136,14 @@ if [ ! -f "${SCRIPT_HELPER_F}" ] || [[ $(<"${SCRIPT_HELPER_F}") == "0" ]]; then
         echo -e "[Journal]\nSystemMaxUse=${CONFIG_INIT_JOURNAL_SYSTEM_MAX:-250M}\nSystemMaxFileSize=${CONFIG_INIT_JOURNAL_FILE_MAX:-50M}" | tee "${JOURNAL_CONF_D}/size.conf" >/dev/null
         echo "New conf file is located at ${JOURNAL_CONF_D}/size.conf"
         echo "Journal size limited"
+    fi
+
+    # RAM - set swappiness
+    if check_config "CONFIG_INIT_RAM_SWAPPINESS_CUSTOMIZE"; then
+        echo -e "\n\nSetting custom swappiness"
+        echo "New swappiness value: ${CONFIG_INIT_RAM_SWAPPINESS_VALUE:-10}"
+        echo "vm.swappiness=${CONFIG_INIT_RAM_SWAPPINESS_VALUE:-10}" | tee "${SYSCTLD_SWAPPINESS_CONF_F}" >/dev/null
+        echo "Custom swappiness set, it will be applied from the next reboot"
     fi
 
     # Pacman - set mirrors
@@ -271,20 +281,20 @@ if [ ! -f "${SCRIPT_HELPER_F}" ] || [[ $(<"${SCRIPT_HELPER_F}") == "0" ]]; then
 
     # Network - optimizations
     if check_config "CONFIG_INIT_NETWORK_OPTIMIZATIONS"; then
-        echo -e "\n\nAdding network confs to ${NETWORK_SYSCTL_CONF_F}"
+        echo -e "\n\nAdding network confs to ${SYSCTLD_NETWORK_CONF_F}"
         echo \
             "# Improve Network performance
 # This sets the max OS receive buffer size for all types of connections.
 net.core.rmem_max = 8388608
 # This sets the max OS send buffer size for all types of connections.
-net.core.wmem_max = 8388608" | tee -a "${NETWORK_SYSCTL_CONF_F}" >/dev/null
+net.core.wmem_max = 8388608" | tee -a "${SYSCTLD_NETWORK_CONF_F}" >/dev/null
         echo "Network optimizations done"
     fi
 
     # Network - enable routing
     if check_config "CONFIG_INIT_NETWORK_ROUTING_ENABLE"; then
-        echo -e "\n\nAdding network confs to ${NETWORK_SYSCTL_CONF_F}"
-        echo "net.ipv4.ip_forward = 1" | tee -a "${NETWORK_SYSCTL_CONF_F}" >/dev/null
+        echo -e "\n\nAdding network confs to ${SYSCTLD_NETWORK_CONF_F}"
+        echo "net.ipv4.ip_forward = 1" | tee -a "${SYSCTLD_NETWORK_CONF_F}" >/dev/null
         echo "Routing enabled"
     fi
 
@@ -332,7 +342,7 @@ ConfigureWithoutCarrier=yes" | tee "${SYSTEMD_NETWORK_D}/macvlan-${1}.network" >
         echo \
             "# Disable IPv6
 net.ipv6.conf.all.disable_ipv6 = 1
-net.ipv6.conf.default.disable_ipv6 = 1" | tee -a "${NETWORK_SYSCTL_CONF_F}" >/dev/null
+net.ipv6.conf.default.disable_ipv6 = 1" | tee -a "${SYSCTLD_NETWORK_CONF_F}" >/dev/null
         echo \
             "LinkLocalAddressing=no
 IPv6AcceptRA=no" | tee -a "${SYSTEMD_NETWORK_D}/${CONFIG_INIT_NETWORK_MACVLAN_PARENT}.network" >/dev/null
