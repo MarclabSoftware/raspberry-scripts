@@ -1,5 +1,12 @@
 #!/usr/bin/env bash
 
+# Press any key to continue
+paktc() {
+    echo
+    read -n 1 -s -r -p "Press any key to continue"
+    echo
+}
+
 # Check if a configuration var exists
 # The argument to use is the name of the var, not the var itself
 # If it exists and its value is true or false: returns the value (true=0 false=1)
@@ -7,7 +14,8 @@
 # If it exists  and its value is any other value: returns >1 values as error
 check_config() {
     if [ $# -eq 0 ]; then
-        echo "${BASH_SOURCE[$i + 1]}:${BASH_LINENO[$i]} - ${FUNCNAME[$i]}: no arguments supplied"
+        echo "${BASH_SOURCE[$i + 1]}:${BASH_LINENO[$i]} - ${FUNCNAME[$i]}: no arguments provided"
+        paktc
         return 2
     fi
     if [ -z ${!1+x} ] || [ "${!1}" = "ask" ]; then
@@ -23,17 +31,12 @@ check_config() {
     elif [ "${!1}" = false ]; then
         return 1
     else
-        echo "${BASH_SOURCE[$i + 1]}:${BASH_LINENO[$i]} - ${FUNCNAME[$i]}: config error for ${1}: wrong value, current value: ${!1}, possible values are true,false,ask"
+        echo -e "\n${BASH_SOURCE[$i + 1]}:${BASH_LINENO[$i]} - ${FUNCNAME[$i]}: config error for ${1}: wrong value, current value: '${!1}'\nPossible values are true,false,ask"
+        paktc
         return 3
     fi
 }
 
-# Press any key to continue
-paktc() {
-    echo
-    read -n 1 -s -r -p "Press any key to continue"
-    echo
-}
 
 # Bash colors
 RED='\033[0;31m'   # Red color
@@ -79,6 +82,8 @@ DHCPD_CONF_F="/etc/dhcpcd.conf"
 TIMESYNCD_CONFS_D="/etc/systemd/timesyncd.conf.d"
 TIMESYNCD_CONF_F="${TIMESYNCD_CONFS_D}/timesyncd-${1}.conf"
 
+clear
+
 # Safety checks
 if [ ! "${EUID:-$(id -u)}" -eq 0 ]; then
     echo "Please run as root"
@@ -118,7 +123,7 @@ fi
 
 # First pass
 if [ ! -f "${SCRIPT_HELPER_F}" ] || [[ $(<"${SCRIPT_HELPER_F}") == "0" ]]; then
-    echo "First init pass"
+    echo -e "\nFirst init pass"
 
     # Block WLAN
     if check_config "CONFIG_INIT_WLAN_BLOCK"; then
