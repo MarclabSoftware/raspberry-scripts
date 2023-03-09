@@ -18,15 +18,14 @@ check_config() {
         else
             return 1
         fi
-    fi
-    if [ "${!1}" = true ]; then
+    elif [ "${!1}" = true ]; then
         return 0
-    fi
-    if [ "${!1}" = false ]; then
+    elif [ "${!1}" = false ]; then
         return 1
+    else
+        echo "${BASH_SOURCE[$i + 1]}:${BASH_LINENO[$i]} - ${FUNCNAME[$i]}: config error for ${1}: wrong value, current value: ${!1}, possible values are true,false,ask"
+        return 3
     fi
-    echo "${BASH_SOURCE[$i + 1]}:${BASH_LINENO[$i]} - ${FUNCNAME[$i]}: config error for ${1}: wrong value, current value: ${!1}, possible values are true,false,ask"
-    return 3
 }
 
 # Press any key to continue
