@@ -10,12 +10,6 @@ check_config() {
         echo "${BASH_SOURCE[$i + 1]}:${BASH_LINENO[$i]} - ${FUNCNAME[$i]}: no arguments supplied"
         return 2
     fi
-    if [ "${!1}" = true ]; then
-        return 0
-    fi
-    if [ "${!1}" = false ]; then
-        return 1
-    fi
     if [ -z ${!1+x} ] || [ "${!1}" = "ask" ]; then
         read -p "Do you want to apply init config for ${1}? Y/N: " -n 1 -r
         echo
@@ -24,6 +18,12 @@ check_config() {
         else
             return 1
         fi
+    fi
+    if [ "${!1}" = true ]; then
+        return 0
+    fi
+    if [ "${!1}" = false ]; then
+        return 1
     fi
     echo "${BASH_SOURCE[$i + 1]}:${BASH_LINENO[$i]} - ${FUNCNAME[$i]}: config error for ${1}: wrong value, current value: ${!1}, possible values are true,false,ask"
     return 3
