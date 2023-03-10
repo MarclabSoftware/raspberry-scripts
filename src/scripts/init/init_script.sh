@@ -7,7 +7,7 @@ paktc() {
     echo
 }
 
-# Check if a configuration var exists
+# Check if a configuration var exists via indirection
 # The argument to use is the name of the var, not the var itself
 # If it exists and its value is true or false: returns the value (true=0 false=1)
 # If it doesn't exist, or if it's value is 'ask': configures it on the fly as boolean and returns the result
@@ -83,25 +83,30 @@ TIMESYNCD_CONF_F="${TIMESYNCD_CONFS_D}/timesyncd-${1}.conf"
 
 clear
 
+help_text="This script must be run as super user using the command: sudo ./init_script.sh \"\${USER}\""
+
 # Safety checks
 if [ ! "${EUID:-$(id -u)}" -eq 0 ]; then
     echo "Please run as root"
-    echo "This script must be run as super user using the command: sudo ./init_script.sh \"\${USER}\""
-    echo -e "${RED}Exiting.${NC}"
+    echo "${help_text}"
+    exit 1
+fi
+
+if [ $# -eq 0 ]; then
+    echo "No arguments provided"
+    echo "${help_text}"
     exit 1
 fi
 
 if [ "${1}" = "root" ]; then
     echo "User argument must be a normal user, you provided ${1}"
-    echo "This script must be run as regular user using the command: sudo ./init_script.sh \"\${USER}\""
-    echo -e "${RED}Exiting.${NC}"
+    echo "${help_text}"
     exit 1
 fi
 
 if [ ! -d "${HOME_USER_D}" ]; then
     echo "User ${1} doesn't exist, please check"
-    echo "This script must be run as regular user with using command: sudo ./init_script.sh \"\${USER}\""
-    echo -e "${RED}Exiting.${NC}"
+    echo "${help_text}"
     exit 2
 fi
 
