@@ -1,42 +1,5 @@
 #!/usr/bin/env bash
 
-# Press any key to continue
-paktc() {
-    echo
-    read -n 1 -s -r -p "Press any key to continue"
-    echo
-}
-
-# Check if a configuration var exists via indirection
-# The argument to use is the name of the var, not the var itself
-# If it exists and its value is true or false: returns the value (true=0 false=1)
-# If it doesn't exist, or if it's value is 'ask': configures it on the fly as boolean and returns the result
-# If it exists  and its value is any other value: returns >1 values as error
-check_config() {
-    if [ $# -eq 0 ]; then
-        echo "${BASH_SOURCE[$i + 1]}:${BASH_LINENO[$i]} - ${FUNCNAME[$i]}: no arguments provided"
-        paktc
-        return 2
-    fi
-    if [ -z ${!1+x} ] || [ "${!1}" = "ask" ]; then
-        read -p "Do you want to apply init config for ${1}? Y/N: " -n 1 -r
-        echo
-        if [[ $REPLY =~ ^[Yy]$ ]]; then
-            return 0
-        else
-            return 1
-        fi
-    elif [ "${!1}" = true ]; then
-        return 0
-    elif [ "${!1}" = false ]; then
-        return 1
-    else
-        echo -e "\n${BASH_SOURCE[$i + 1]}:${BASH_LINENO[$i]} - ${FUNCNAME[$i]}: config error for ${1}: wrong value, current value: '${!1}'\nPossible values are true,false,ask"
-        paktc
-        return 3
-    fi
-}
-
 # Bash colors
 RED='\033[0;31m'   # Red color
 GREEN='\033[0;32m' # Green color
@@ -46,11 +9,44 @@ NC='\033[0m'       # No color
 SCRIPT_D=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" &>/dev/null && pwd)
 SCRIPT_NAME=$(basename "$(readlink -f "${0}")" .sh)
 CONFIG_F="${SCRIPT_D}/${SCRIPT_NAME}.conf"
+UTILS_F="${SCRIPT_D}/utils.sh"
+RFKILL_F="${SCRIPT_D}/rfkill.sh"
+
+# Source utils
+. "${UTILS_F}"
+
+clear
+
+# Safety checks
+help_text="This script must be run as super user using the command: sudo ./init_script.sh \"\${USER}\""
+
+if ! check_su; then
+    echo "${help_text}"
+    exit 1
+fi
+
+if [ $# -eq 0 ]; then
+    echo "No arguments provided"
+    echo "${help_text}"
+    exit 1
+fi
+
+if [ "${1}" = "root" ]; then
+    echo "User argument must be a normal user, you provided ${1}"
+    echo "${help_text}"
+    exit 1
+fi
+
+if ! id "${1}" &>/dev/null; then
+    echo "User ${1} doesn't exist, please check"
+    echo "${help_text}"
+    exit 2
+fi
 
 # Constants
-HOME_USER_D="/home/${1}"
-HOME_ROOT_D="/root"
-SCRIPT_HELPER_F="${HOME_USER_D}/.init_script_progress"
+HOME_USER_D=$(sudo -u "${1}" sh -c 'echo $HOME')
+HOME_ROOT_D=$(sudo -u root sh -c 'echo $HOME')
+HELPER_F="${HOME_USER_D}/.${SCRIPT_NAME}_progress"
 JOURNAL_CONF_D="/etc/systemd/journald.conf.d"
 SYSCTLD_D="/etc/sysctl.d"
 SYSCTLD_NETWORK_CONF_F="${SYSCTLD_D}/21-${1}_network.conf"
@@ -81,35 +77,6 @@ DHCPD_CONF_F="/etc/dhcpcd.conf"
 TIMESYNCD_CONFS_D="/etc/systemd/timesyncd.conf.d"
 TIMESYNCD_CONF_F="${TIMESYNCD_CONFS_D}/timesyncd-${1}.conf"
 
-clear
-
-help_text="This script must be run as super user using the command: sudo ./init_script.sh \"\${USER}\""
-
-# Safety checks
-if [ ! "${EUID:-$(id -u)}" -eq 0 ]; then
-    echo "Please run as root"
-    echo "${help_text}"
-    exit 1
-fi
-
-if [ $# -eq 0 ]; then
-    echo "No arguments provided"
-    echo "${help_text}"
-    exit 1
-fi
-
-if [ "${1}" = "root" ]; then
-    echo "User argument must be a normal user, you provided ${1}"
-    echo "${help_text}"
-    exit 1
-fi
-
-if [ ! -d "${HOME_USER_D}" ]; then
-    echo "User ${1} doesn't exist, please check"
-    echo "${help_text}"
-    exit 2
-fi
-
 # Import config file
 if [ -f "${CONFIG_F}" ]; then
     echo "Config file found... importing it"
@@ -119,11 +86,11 @@ else
 fi
 
 # Create helper file if not found
-if [ ! -f "${SCRIPT_HELPER_F}" ]; then
-    echo "0" | sudo -u "${1}" tee "${SCRIPT_HELPER_F}" >/dev/null
+if [ ! -f "${HELPER_F}" ]; then
+    echo "0" | sudo -u "${1}" tee "${HELPER_F}" >/dev/null
 fi
 
-helper_f_content=$(<"${SCRIPT_HELPER_F}")
+helper_f_content=$(<"${HELPER_F}")
 
 if [[ "${helper_f_content}" == "2" ]]; then
     echo "All config already done, exiting."
@@ -134,11 +101,10 @@ elif [[ "${helper_f_content}" == "0" ]]; then
 
     echo -e "\nFirst init pass"
 
-    # Block WLAN
-    if check_config "CONFIG_INIT_WLAN_BLOCK"; then
-        echo -e "\nBlocking WLAN"
-        rfkill block wlan
-        echo "WLAN Blocked"
+    # Rfkill - block wireless devices
+    if check_config "CONFIG_INIT_RFKILL"; then
+        . "${RFKILL_F}"
+        rf_block
     fi
 
     # Journal - limit size
@@ -174,6 +140,7 @@ elif [[ "${helper_f_content}" == "0" ]]; then
 
     # Pacman - update
     echo -e "\n\nUpdating packages"
+    # FIXME: noconfirm doesn't work with packages like linux-rpi4-mainline due to incompatibilites with installed packages
     pacman -Syyuu --noconfirm
     echo "Packages updated"
 
@@ -191,7 +158,8 @@ elif [[ "${helper_f_content}" == "0" ]]; then
         if [[ -v CONFIG_INIT_PACMAN_PACKAGES[@] ]]; then
             echo -e "\n\nInstalling new packages"
             echo "New packages to install: ${CONFIG_INIT_PACMAN_PACKAGES[*]}"
-            pacman -S --noconfirm --needed "${CONFIG_INIT_PACMAN_PACKAGES[*]}"
+            # FIXME: noconfirm doesn't work with packages like linux-rpi4-mainline due to incompatibilites with installed packages
+            pacman -S --noconfirm --needed "${CONFIG_INIT_PACMAN_PACKAGES[@]}"
             echo "New packages installed"
         else
             echo "CONFIG_INIT_PACMAN_PACKAGES is not defined or is not an array"
@@ -512,7 +480,7 @@ DNSStubListener=no
     fi
 
     # Pass 1 done
-    echo "1" | sudo -u "${1}" tee "${SCRIPT_HELPER_F}"
+    echo "1" | sudo -u "${1}" tee "${HELPER_F}"
     echo -e "\n\nFirst part of the config done"
     echo "Please check sshd config using 'sudo sshd -t' command and fix any problem before rebooting"
     echo "If the command sudo sshd -t has no output the config is ok"
@@ -574,7 +542,7 @@ elif [[ "${helper_f_content}" == "1" ]]; then
         fi
     fi
 
-    echo "2" | sudo -u "${1}" tee "${SCRIPT_HELPER_F}"
+    echo "2" | sudo -u "${1}" tee "${HELPER_F}"
     echo -e "\n\nSecond part of the config done"
     exit 0
 fi
