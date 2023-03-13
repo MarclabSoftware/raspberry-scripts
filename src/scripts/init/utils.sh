@@ -55,18 +55,15 @@ checkCommand() {
     return 0
 }
 
-# Check if a var is unset or empty, arg: var name
-isVarEmpty() {
-    if [ -z ${1+x} ]; then
-        return 0
-    fi
-    return 1
+# Check if a var is set, bash only
+isVarSet() {
+    declare -p "$1" &>/dev/null
 }
 
-# Return type of a variable, bash only
+# Return type of a variable, input arg is var name, bash only
 varType() {
-    if [ -z "$BASH" ]; then
-        echo "NOT BASH"
+    if ! isVarSet "$1"; then
+        echo "UNSET"
         return 1
     fi
 
@@ -97,7 +94,7 @@ varType() {
     return 0
 }
 
-# Check if a var is an array, input arg is var name
+# Check if a var is an array, input arg is var name, bash only
 isArray() {
     if (varType "$1" | grep -q "ARRAY"); then
         return 0
