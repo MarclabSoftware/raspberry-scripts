@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 
-set_swappiness() {
+setSwappiness() {
     # Defaults
     local swappiness_default=60
     # Dirs
@@ -26,6 +26,6 @@ if [ "${sourced}" = false ]; then
     if ! check_su; then
         exit 1
     fi
-    set_swappiness
-    exit 0
+    setSwappiness
+    exit $?
 fi

@@ -1,11 +1,11 @@
 #!/usr/bin/env bash
 
-rf_block() {
+blockRf() {
     # Config var name + indirection
     local config_interfaces_name="CONFIG_RFKILL_INTERFACES"
     declare -n config_interfaces_str="${config_interfaces_name}"
 
-    if ! check_command "rfkill"; then
+    if ! checkCommand "rfkill"; then
         echo "rfkill not found"
         return 1 # Error
     fi
@@ -39,6 +39,6 @@ if [ "${sourced}" = false ]; then
     if ! check_su; then
         exit 1
     fi
-    rf_block
-    exit 0
+    blockRf
+    exit $?
 fi

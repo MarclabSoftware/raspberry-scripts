@@ -6,7 +6,7 @@ setPacmanCountries() {
     # Apply default if conf is not found
     local coutries="${CONFIG_PACMAN_MIRRORS_COUNTRIES:=$countries_default}"
 
-    if ! check_command "pacman-mirrors"; then
+    if ! checkCommand "pacman-mirrors"; then
         echo "pacman-mirrors not found"
         return 1 # Error
     fi

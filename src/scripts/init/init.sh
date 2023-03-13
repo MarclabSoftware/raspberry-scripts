@@ -103,25 +103,25 @@ elif [[ "${helper_f_content}" == "0" ]]; then
     echo -e "\nFirst init pass"
 
     # Rfkill - block wireless devices
-    if check_config "CONFIG_INIT_RFKILL"; then
+    if checkConfig "CONFIG_INIT_RFKILL"; then
         . "${RFKILL_F}"
-        rf_block
+        blockRf
     fi
 
     # Journal - limit size
-    if check_config "CONFIG_INIT_JOURNAL_LIMIT"; then
+    if checkConfig "CONFIG_INIT_JOURNAL_LIMIT"; then
         . "${JOURNAL_LIMIT_F}"
-        journal_limit
+        limitJournal
     fi
 
     # RAM - set swappiness
-    if check_config "CONFIG_INIT_RAM_SWAPPINESS_CUSTOMIZE"; then
+    if checkConfig "CONFIG_INIT_RAM_SWAPPINESS_CUSTOMIZE"; then
         . "${SWAPPINESS_F}"
-        set_swappiness
+        setSwappiness
     fi
 
     # Pacman - set mirrors
-    if check_config "CONFIG_INIT_PACMAN_SET_MIRROR_COUNTRIES"; then
+    if checkConfig "CONFIG_INIT_PACMAN_SET_MIRROR_COUNTRIES"; then
         . "${PACMAN_COUNTRIES_F}"
         setPacmanCountries
     fi
@@ -133,7 +133,7 @@ elif [[ "${helper_f_content}" == "0" ]]; then
     echo "Packages updated"
 
     # Pacman - enable colored output
-    if check_config "CONFIG_PACMAN_ENABLE_COLORS"; then
+    if checkConfig "CONFIG_PACMAN_ENABLE_COLORS"; then
         echo -e "\n\nEnabling Pacman colored output"
         cp -a "${PACMAN_CONF_F}" "${PACMAN_CONF_F}.bak"
         echo "Pacman config file backed up at ${PACMAN_CONF_F}.bak"
@@ -142,7 +142,7 @@ elif [[ "${helper_f_content}" == "0" ]]; then
     fi
 
     # Pacman - install packages
-    if check_config "CONFIG_PACMAN_INSTALL_PACKAGES"; then
+    if checkConfig "CONFIG_PACMAN_INSTALL_PACKAGES"; then
         if [[ -v CONFIG_PACMAN_PACKAGES[@] ]]; then
             echo -e "\n\nInstalling new packages"
             echo "New packages to install: ${CONFIG_PACMAN_PACKAGES[*]}"
@@ -166,14 +166,14 @@ elif [[ "${helper_f_content}" == "0" ]]; then
     echo "Unneded cached packages removed"
 
     # Rpi - EEPROM update
-    if check_config "CONFIG_RPI_EEPROM_BRANCH_CHANGE"; then
+    if checkConfig "CONFIG_RPI_EEPROM_BRANCH_CHANGE"; then
         echo -e "\n\nChanging Rpi EEPROM update channel to '${CONFIG_RPI_EEPROM_UPDATE_BRANCH:-stable}'"
         sed -i 's/FIRMWARE_RELEASE_STATUS=".*"/FIRMWARE_RELEASE_STATUS="'"${CONFIG_RPI_EEPROM_UPDATE_BRANCH:-stable}"'"/g' "${EEPROM_UPDATE_F}"
         echo "Rpi EEPROM update channel changed"
     fi
 
     # Rpi - EEPROM update check
-    if check_config "CONFIG_RPI_EEPROM_UPDATE_CHECK"; then
+    if checkConfig "CONFIG_RPI_EEPROM_UPDATE_CHECK"; then
         echo -e "\n\nChecking for Rpi EEPROM updates"
         if command -v rpi-eeprom-update &>/dev/null; then
             rpi-eeprom-update -d -a
@@ -185,7 +185,7 @@ elif [[ "${helper_f_content}" == "0" ]]; then
     fi
 
     # Rpi - Overclock
-    if check_config "CONFIG_RPI_OVERCLOCK_ENABLE"; then
+    if checkConfig "CONFIG_RPI_OVERCLOCK_ENABLE"; then
         echo -e "\n\nSetting overclock"
         if ! grep -q "# Overclock-${1}" "${BOOT_CONF_F}"; then
             echo "Overclock config not found"
@@ -204,7 +204,7 @@ elif [[ "${helper_f_content}" == "0" ]]; then
     fi
 
     # User - add to groups
-    if check_config "CONFIG_USER_ADD_TO_GROUPS"; then
+    if checkConfig "CONFIG_USER_ADD_TO_GROUPS"; then
         if [[ -v CONFIG_USER_GROUPS_TO_ADD[@] ]]; then
             echo -e "\n\nAdding ${1} to ${CONFIG_USER_GROUPS_TO_ADD[*]} groups"
             for group in "${CONFIG_USER_GROUPS_TO_ADD[@]}"; do
@@ -217,7 +217,7 @@ elif [[ "${helper_f_content}" == "0" ]]; then
     fi
 
     # User - sudo without password
-    if check_config "CONFIG_USER_SUDO_WITHOUT_PWD"; then
+    if checkConfig "CONFIG_USER_SUDO_WITHOUT_PWD"; then
         echo -e "\n\nSetting sudo without password for ${1}"
         if [ ! -f "${SUDOERS_F}" ]; then
             echo "${SUDOERS_F} doesn't exist."
@@ -231,7 +231,7 @@ elif [[ "${helper_f_content}" == "0" ]]; then
     fi
 
     # Nano - enable syntax highlighting
-    if check_config "CONFIG_NANO_ENABLE_SYNTAX_HIGHLIGHTING"; then
+    if checkConfig "CONFIG_NANO_ENABLE_SYNTAX_HIGHLIGHTING"; then
         echo -e "\n\nEnabling Nano Syntax highlighting for root and ${1}"
         if [ ! -f "${NANO_CONF_ROOT_F}" ] || ! grep -q 'include "/usr/share/nano/\*.nanorc' "${NANO_CONF_ROOT_F}"; then
             echo -e 'include "/usr/share/nano/*.nanorc"\nset linenumbers' | tee -a "${NANO_CONF_ROOT_F}" >/dev/null
@@ -249,7 +249,7 @@ elif [[ "${helper_f_content}" == "0" ]]; then
     fi
 
     # Network - optimizations
-    if check_config "CONFIG_NETWORK_OPTIMIZATIONS"; then
+    if checkConfig "CONFIG_NETWORK_OPTIMIZATIONS"; then
         echo -e "\n\nAdding network confs to ${SYSCTLD_NETWORK_CONF_F}"
         echo \
             "# Improve Network performance
@@ -261,14 +261,14 @@ net.core.wmem_max = 8388608" | tee -a "${SYSCTLD_NETWORK_CONF_F}" >/dev/null
     fi
 
     # Network - enable routing
-    if check_config "CONFIG_NETWORK_ROUTING_ENABLE"; then
+    if checkConfig "CONFIG_NETWORK_ROUTING_ENABLE"; then
         echo -e "\n\nAdding network confs to ${SYSCTLD_NETWORK_CONF_F}"
         echo "net.ipv4.ip_forward = 1" | tee -a "${SYSCTLD_NETWORK_CONF_F}" >/dev/null
         echo "Routing enabled"
     fi
 
     # Network - MACVLAN host <-> docker bridge
-    if check_config "CONFIG_NETWORK_MACVLAN_SETUP"; then
+    if checkConfig "CONFIG_NETWORK_MACVLAN_SETUP"; then
         echo -e "\n\nMACVLAN host <-> docker bridge setup"
         echo \
             "[Match]
@@ -303,7 +303,7 @@ ConfigureWithoutCarrier=yes" | tee "${SYSTEMD_NETWORK_D}/macvlan-${1}.network" >
     fi
 
     # Network - IPv6 Disable
-    if check_config "CONFIG_NETWORK_IPV6_DISABLE"; then
+    if checkConfig "CONFIG_NETWORK_IPV6_DISABLE"; then
         echo -e "\n\nDisabling IPv6"
         cp -a "${BOOT_CMDLINE_F}" "${BOOT_CMDLINE_F}.bak"
         echo "Boot cmdline file backed up at ${BOOT_CMDLINE_F}.bak"
@@ -326,7 +326,7 @@ noipv6" | tee -a "${DHCPD_CONF_F}" >/dev/null
     fi
 
     # SSD - enable trim
-    if check_config "CONFIG_SSD_TRIM_ENABLE"; then
+    if checkConfig "CONFIG_SSD_TRIM_ENABLE"; then
         echo -e "\n\nAdding fstrim conf to ${TRIM_RULES_F}"
         echo "Configured vendor: ${CONFIG_SSD_TRIM_VENDOR:-04e8} | product: ${CONFIG_SSD_TRIM_PRODUCT:-61f5}"
         echo "Please check with command lsusb if they are correct for your SSD device"
@@ -340,7 +340,7 @@ noipv6" | tee -a "${DHCPD_CONF_F}" >/dev/null
     fi
 
     # SSD - FS optimizations
-    if check_config "CONFIG_SSD_OPTIMIZATIONS"; then
+    if checkConfig "CONFIG_SSD_OPTIMIZATIONS"; then
         echo -e "\n\nFilesystem optimizations for SSD/MicroSD"
         cp -a /etc/fstab /etc/fstab.bak
         echo "/etc/fstab backed up to /etc/fstab.bak"
@@ -349,7 +349,7 @@ noipv6" | tee -a "${DHCPD_CONF_F}" >/dev/null
     fi
 
     # NTP - custom config
-    if check_config "CONFIG_NTP_CUSTOMIZATION"; then
+    if checkConfig "CONFIG_NTP_CUSTOMIZATION"; then
         if systemctl is-active --quiet systemd-timesyncd; then
             echo -e "\n\nTimesyncd setup"
             echo "NTP server: ${CONFIG_NTP_SERVERS:-time.cloudflare.com}"
@@ -380,7 +380,7 @@ FallbackNTP=${CONFIG_NTP_FALLBACK_SERVERS:-pool.ntp.org}
     chmod 700 "${SSH_ROOT_D}" "${SSH_USER_D}"
     echo ".ssh folders added"
 
-    if check_config "CONFIG_SSH_KEYS_ADD"; then
+    if checkConfig "CONFIG_SSH_KEYS_ADD"; then
         echo -e "\n\nAdding SSH keys"
         echo -e "Please insert public SSH key for ${1} and press Enter\nEG: ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIB8Ht8Z3j6yDWPBHQtOp/R9rjWvfMYo3MSA/K6q8D86r"
         read -r
@@ -391,7 +391,7 @@ FallbackNTP=${CONFIG_NTP_FALLBACK_SERVERS:-pool.ntp.org}
         echo "SSH keys added"
     fi
 
-    if check_config "CONFIG_SSH_HOSTS_ADD"; then
+    if checkConfig "CONFIG_SSH_HOSTS_ADD"; then
         echo -e "\n\nAdding SSH useful known hosts"
         ssh-keyscan "${CONFIG_SSH_HOSTS[@]}" | tee "${SSH_KNOWN_HOSTS_ROOT_F}" >/dev/null
         mkdir -p "${SSH_USER_D}"
@@ -401,7 +401,7 @@ FallbackNTP=${CONFIG_NTP_FALLBACK_SERVERS:-pool.ntp.org}
         echo "SSH useful known hosts added"
     fi
 
-    if check_config "CONFIG_SSH_HARDENING"; then
+    if checkConfig "CONFIG_SSH_HARDENING"; then
         echo -e "\n\nHardening SSH\nhttps://www.ssh-audit.com/hardening_guides.html for details"
         rm -rf "${SSH_CONF_D}"/ssh_host_*
         ssh-keygen -t rsa -b 4096 -f "${SSH_CONF_D}/ssh_host_rsa_key" -N ""
@@ -418,21 +418,21 @@ FallbackNTP=${CONFIG_NTP_FALLBACK_SERVERS:-pool.ntp.org}
     fi
 
     # Services - bluetooth
-    if check_config "CONFIG_SRV_BT_ENABLE"; then
+    if checkConfig "CONFIG_SRV_BT_ENABLE"; then
         echo -e "\n\nEnabling and starting Bluetooth service"
         systemctl enable --now bluetooth
         echo -e "\nBluetooth service enabled & started"
     fi
 
     # Services - docker
-    if check_config "CONFIG_SRV_DOCKER_ENABLE"; then
+    if checkConfig "CONFIG_SRV_DOCKER_ENABLE"; then
         echo -e "\n\nEnabling Docker service"
         systemctl enable docker.service #  FIXME: Failed to enable unit: File docker.service: Is a directory
         echo -e "\nDocker service enabled"
     fi
 
     # DNS
-    if check_config "CONFIG_DNS_CUSTOMIZATION"; then
+    if checkConfig "CONFIG_DNS_CUSTOMIZATION"; then
         echo -e "\n\nAdding DNS systemd-resolved configs"
         mkdir -p "${RESOLVED_CONFS_D}"
         if [ ! -f "${RESOLVED_CONF_F}" ]; then
@@ -458,7 +458,7 @@ DNSStubListener=no
             paktc
         fi
     fi
-    if check_config "CONFIG_DNS_UPLINK_MODE"; then
+    if checkConfig "CONFIG_DNS_UPLINK_MODE"; then
         echo -e "\n\nSetting systemd-resolved in uplink mode"
         mv -f "${RESOLV_CONF_F}" "${RESOLV_CONF_F}.bak"
         echo "${RESOLV_CONF_F} backed up to ${RESOLV_CONF_F}.bak"
@@ -480,7 +480,7 @@ elif [[ "${helper_f_content}" == "1" ]]; then
     echo "Second init pass"
 
     # Docker - login
-    if check_config "CONFIG_DOCKER_LOGIN"; then
+    if checkConfig "CONFIG_DOCKER_LOGIN"; then
         echo -e "\n\nDocker login"
         echo "Please prepare docker hub user and password"
         paktc
@@ -488,14 +488,14 @@ elif [[ "${helper_f_content}" == "1" ]]; then
     fi
 
     # Docker - custom bridge network
-    if check_config "CONFIG_DOCKER_NETWORK_ADD_CUSTOM_BRIDGE"; then
+    if checkConfig "CONFIG_DOCKER_NETWORK_ADD_CUSTOM_BRIDGE"; then
         echo -e "\n\nCreating Docker custom bridge network bridge_${1}"
         sudo -u "${1}" docker network create "bridge_${1}"
         echo "Docker custom bridge network created"
     fi
 
     # Docker - add MACVLAN network
-    if check_config "CONFIG_DOCKER_NETWORK_ADD_MACVLAN"; then
+    if checkConfig "CONFIG_DOCKER_NETWORK_ADD_MACVLAN"; then
         echo -e "\n\nCreating Docker custom MACVLAN network macvlan_${1}"
         sudo -u "${1}" docker network create "bridge_${1}"
         sudo -u "${1}" docker network create -d macvlan \
@@ -509,7 +509,7 @@ elif [[ "${helper_f_content}" == "1" ]]; then
     fi
 
     # Backup - restore
-    if check_config "CONFIG_BACKUP_RESTORE"; then
+    if checkConfig "CONFIG_BACKUP_RESTORE"; then
         echo -e "\n\nRestoring backup"
         if [ ! -f "${CONFIG_BACKUP_FILE_PATH}" ]; then
             echo -e "\nCannot find ${CONFIG_BACKUP_FILE_PATH}, please check"
@@ -519,7 +519,7 @@ elif [[ "${helper_f_content}" == "1" ]]; then
         fi
     fi
 
-    if check_config "CONFIG_DOCKER_COMPOSE_START"; then
+    if checkConfig "CONFIG_DOCKER_COMPOSE_START"; then
         echo -e "\n\nStarting docker compose"
         if [ -f "${CONFIG_DOCKER_COMPOSE_FILE_PATH}" ]; then
             sudo -u "${1}" docker compose -f "${CONFIG_DOCKER_COMPOSE_FILE_PATH}" up -d

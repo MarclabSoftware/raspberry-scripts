@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 
-journal_limit() {
+limitJournal() {
     # Defaults
     local config_journal_system_max_default="250M"
     local config_journal_file_max_default="50M"
@@ -31,6 +31,6 @@ if [ "${sourced}" = false ]; then
     if ! check_su; then
         exit 1
     fi
-    journal_limit
-    exit 0
+    limitJournal
+    exit $?
 fi

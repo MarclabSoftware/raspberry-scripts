@@ -21,7 +21,7 @@ check_su() {
 # If it exists and its value is true or false: returns the value (true=0 false=1)
 # If it doesn't exist, or if it's value is 'ask': configures it on the fly as boolean and returns the result
 # If it exists  and its value is any other value: returns >1 values as error
-check_config() {
+checkConfig() {
     if [ $# -eq 0 ]; then
         echo "${BASH_SOURCE[$i + 1]}:${BASH_LINENO[$i]} - ${FUNCNAME[$i]}: no arguments provided"
         paktc
@@ -47,10 +47,60 @@ check_config() {
 }
 
 # Check if a command exists
-check_command() {
+checkCommand() {
     if ! command -v "${1}" &>/dev/null; then
         echo "${1} command not found"
         return 1
     fi
     return 0
+}
+
+# Check if a var is unset or empty, arg: var name
+isVarEmpty() {
+    if [ -z ${1+x} ]; then
+        return 0
+    fi
+    return 1
+}
+
+# Return type of a variable, bash only
+varType() {
+    if [ -z "$BASH" ]; then
+        echo "NOT BASH"
+        return 1
+    fi
+
+    local var
+    var=$(declare -p "$1" 2>/dev/null)
+    local reg='^declare -n [^=]+=\"([^\"]+)\"$'
+    while [[ $var =~ $reg ]]; do
+        var=$(declare -p "${BASH_REMATCH[1]}")
+    done
+
+    case "${var#declare -}" in
+    a*)
+        echo "ARRAY"
+        ;;
+    A*)
+        echo "HASH"
+        ;;
+    i*)
+        echo "INT"
+        ;;
+    x*)
+        echo "EXPORT"
+        ;;
+    *)
+        echo "OTHER"
+        ;;
+    esac
+    return 0
+}
+
+# Check if a var is an array, input arg is var name
+isArray() {
+    if (varType "$1" | grep -q "ARRAY"); then
+        return 0
+    fi
+    return 1
 }
