@@ -31,5 +31,5 @@ if [ "${sourced}" = false ]; then
         exit 1
     fi
     setPacmanCountries
-    exit 0
+    exit $?
 fi
