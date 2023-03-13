@@ -13,6 +13,7 @@ UTILS_F="${SCRIPT_D}/utils.sh"
 RFKILL_F="${SCRIPT_D}/rfkill.sh"
 JOURNAL_LIMIT_F="${SCRIPT_D}/journal_limit.sh"
 SWAPPINESS_F="${SCRIPT_D}/swappiness.sh"
+PACMAN_COUNTRIES_F="${SCRIPT_D}/pacman_countries.sh"
 
 # Source utils
 . "${UTILS_F}"
@@ -120,16 +121,9 @@ elif [[ "${helper_f_content}" == "0" ]]; then
     fi
 
     # Pacman - set mirrors
-    if check_config "CONFIG_PACMAN_SET_MIRROR_COUNTRIES"; then
-        echo -e "\n\nUpdating pacman mirrors"
-        if command -v pacman-mirrors &>/dev/null; then
-            echo "Using ${CONFIG_PACMAN_MIRRORS_COUNTRIES:-Global} as mirrors"
-            pacman-mirrors --country "${CONFIG_PACMAN_MIRRORS_COUNTRIES:-Global}"
-            echo "Pacman mirrors updated"
-        else
-            echo "Missing pacman-mirrors command"
-            paktc
-        fi
+    if check_config "CONFIG_INIT_PACMAN_SET_MIRROR_COUNTRIES"; then
+        . "${PACMAN_COUNTRIES_F}"
+        setPacmanCountries
     fi
 
     # Pacman - update
