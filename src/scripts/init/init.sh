@@ -23,7 +23,7 @@ clear
 # Safety checks
 help_text="This script must be run as super user using the command: sudo ./init_script.sh \"\${USER}\""
 
-if ! check_su; then
+if ! checkSU; then
     echo "${help_text}"
     exit 1
 fi

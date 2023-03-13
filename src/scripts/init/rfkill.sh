@@ -36,7 +36,7 @@ if [ "${sourced}" = false ]; then
     # Source needed files
     . "${SCRIPT_D}/init.conf"
     . "${SCRIPT_D}/utils.sh"
-    if ! check_su; then
+    if ! checkSU; then
         exit 1
     fi
     blockRf

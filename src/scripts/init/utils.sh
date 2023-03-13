@@ -8,7 +8,7 @@ paktc() {
 }
 
 # Check if running as root
-check_su() {
+checkSU() {
     if [ ! "${EUID:-$(id -u)}" -eq 0 ]; then
         echo "Please run as root"
         return 1
