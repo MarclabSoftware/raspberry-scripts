@@ -14,6 +14,7 @@ RFKILL_F="${SCRIPT_D}/rfkill.sh"
 JOURNAL_LIMIT_F="${SCRIPT_D}/journal_limit.sh"
 SWAPPINESS_F="${SCRIPT_D}/swappiness.sh"
 PACMAN_COUNTRIES_F="${SCRIPT_D}/pacman_countries.sh"
+PACMAN_COLORS_F="${SCRIPT_D}/pacman_colors.sh"
 
 # Source utils
 . "${UTILS_F}"
@@ -58,7 +59,6 @@ BOOT_CMDLINE_F="/boot/cmdline.txt"
 NANO_CONF_F=".nanorc"
 NANO_CONF_USER_F="${HOME_USER_D}/${NANO_CONF_F}"
 NANO_CONF_ROOT_F="${HOME_ROOT_D}/${NANO_CONF_F}"
-PACMAN_CONF_F="/etc/pacman.conf"
 EEPROM_UPDATE_F="/etc/default/rpi-eeprom-update"
 TRIM_RULES_F="/etc/udev/rules.d/11-trim_samsung.rules"
 RESOLVED_CONFS_D="/etc/systemd/resolved.conf.d"
@@ -133,12 +133,9 @@ elif [[ "${helper_f_content}" == "0" ]]; then
     echo "Packages updated"
 
     # Pacman - enable colored output
-    if checkConfig "CONFIG_PACMAN_ENABLE_COLORS"; then
-        echo -e "\n\nEnabling Pacman colored output"
-        cp -a "${PACMAN_CONF_F}" "${PACMAN_CONF_F}.bak"
-        echo "Pacman config file backed up at ${PACMAN_CONF_F}.bak"
-        sed -i 's/#Color/Color\nILoveCandy/g' "${PACMAN_CONF_F}"
-        echo -e "Pacman colored output enabled"
+    if checkConfig "CONFIG_INIT_PACMAN_ENABLE_COLORS"; then
+        . "${PACMAN_COLORS_F}"
+        setPacmanColors
     fi
 
     # Pacman - install packages
