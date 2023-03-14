@@ -19,4 +19,5 @@ if [ "$sourced" = false ]; then
         exit 1
     fi
     enableRouting
+    exit $?
 fi
