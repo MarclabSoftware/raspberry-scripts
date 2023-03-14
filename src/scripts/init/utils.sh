@@ -56,17 +56,26 @@ checkCommand() {
 }
 
 # Check if a var is set, bash only
+# $1: var name
+# EG: isVarSet variable_name
 isVarSet() {
+    [ $# -eq 0 ] && return 1
+    [ -z "$1" ] && return 1
     declare -p "$1" &>/dev/null
 }
 
-# Returns 0 if a var is unset or if it's set but has no value assigned
+# Check if a var content has no value assigned
+# $1: var content
+# EG: isVarEmpty $variable_name
 isVarEmpty() {
+    [ $# -eq 0 ] && return 1
     [ -z "$1" ] && return 0
     return 1
 }
 
-# Return type of a variable, input arg is var name, bash only
+# Return type of a variable, bash only
+# $1: var name
+# EG: getVarType variable_name
 getVarType() {
     if ! isVarSet "$1"; then
         echo "UNSET"
@@ -100,7 +109,9 @@ getVarType() {
     return 0
 }
 
-# Check if a var is an array, input arg is var name, bash only
+# Check if a var is an array, bash only
+# $1: var name
+# EG: isVarArray variable_name
 isVarArray() {
     if (getVarType "$1" | grep -q "ARRAY"); then
         return 0
@@ -109,6 +120,8 @@ isVarArray() {
 }
 
 # Check if a var is int, input arg is var name, bash only
+# $1: var name
+# EG: isVarInt variable_name
 isVarInt() {
     if (getVarType "$1" | grep -q "INT"); then
         return 0
@@ -116,12 +129,31 @@ isVarInt() {
     return 1
 }
 
-
 # Check if a var is other, input arg is var name, bash only
 # Userful for strings
+# $1: var name
+# EG: isVarOther variable_name
 isVarOther() {
     if (getVarType "$1" | grep -q "OTHER"); then
         return 0
     fi
     return 1
+}
+
+# Check if provided user exists and isn't root
+# $1: username to check
+isNormalUser() {
+    if [ $# -eq 0 ]; then
+        return 1
+    fi
+    if isVarEmpty "$1"; then
+        return 1
+    fi
+    if ! id "${1}" &>/dev/null; then
+        return 1
+    fi
+    if [ "${1}" = "root" ]; then
+        return 1
+    fi
+    return 0
 }
