@@ -20,6 +20,7 @@ PACMAN_COLORS_F="${SCRIPT_D}/pacman_colors.sh"
 PACMAN_INSTALL_PKGS_F="${SCRIPT_D}/pacman_install_pkgs.sh"
 PACMAN_CLEANUP_F="${SCRIPT_D}/pacman_cleanup.sh"
 RPI_EEPROM_BRANCH_F="${SCRIPT_D}/rpi_eeprom_branch.sh"
+RPI_EEPROM_update_F="${SCRIPT_D}/rpi_eeprom_update.sh"
 
 # Source utils
 # shellcheck source=utils.sh
@@ -171,15 +172,10 @@ elif [[ "${helper_f_content}" == "0" ]]; then
     fi
 
     # Rpi - EEPROM update check
-    if checkConfig "CONFIG_RPI_EEPROM_UPDATE_CHECK"; then
-        echo -e "\n\nChecking for Rpi EEPROM updates"
-        if command -v rpi-eeprom-update &>/dev/null; then
-            rpi-eeprom-update -d -a
-            echo "Rpi EEPROM updates checked"
-        else
-            echo "rpi-eeprom-update command missing"
-            paktc
-        fi
+    if checkConfig "CONFIG_INIT_RPI_EEPROM_UPDATE_CHECK"; then
+        # shellcheck source=rpi_eeprom_update.sh
+        . "${RPI_EEPROM_update_F}"
+        updateEeprom
     fi
 
     # Rpi - Overclock
