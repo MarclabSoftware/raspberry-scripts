@@ -23,53 +23,53 @@ RPI_EEPROM_BRANCH_F="${SCRIPT_D}/rpi_eeprom_branch.sh"
 RPI_EEPROM_UPDATE_F="${SCRIPT_D}/rpi_eeprom_update.sh"
 RPI_OVERCLOCK_F="${SCRIPT_D}/rpi_overclock.sh"
 USER_GROUPS_F="${SCRIPT_D}/user_groups.sh"
+USER_PASSWRODLESS_SUDO="${SCRIPT_D}/user_passwordless_sudo.sh"
 
 # Source utils
 # shellcheck source=utils.sh
-. "${UTILS_F}"
+. "$UTILS_F"
 
 clear
 
 # Safety checks
-help_text="This script must be run as super user using the command: sudo ./init_script.sh \"\${USER}\""
-
 if ! checkSU; then
-    echo "${help_text}"
+    echo "This script must be run as super user"
     exit 1
 fi
 
-if [ $# -eq 0 ]; then
-    echo "No arguments provided"
-    echo "${help_text}"
-    exit 1
+# Import config file
+if [ -f "$CONFIG_F" ]; then
+    echo "Config file found... importing it"
+    # shellcheck source=init.conf
+    . "$CONFIG_F"
+else
+    echo "Config file not found... proceeding to manual config"
 fi
 
-if [ "${1}" = "root" ]; then
-    echo "User argument must be a normal user, you provided ${1}"
-    echo "${help_text}"
-    exit 1
+if isVarEmpty "$CONFIG_USER"; then
+    echo -e "\nMissing CONFIG_USER, please enter the normal user name and press enter\n"
+    read -r
+    CONFIG_USER="$REPLY"
 fi
 
-if ! id "${1}" &>/dev/null; then
-    echo "User ${1} doesn't exist, please check"
-    echo "${help_text}"
-    exit 2
+if ! isNormalUser "$CONFIG_USER"; then
+    echo -e "\nCONFIG_USER problem, it must be set, it must be a normal user, it must exists"
+    exit 1
 fi
 
 # Constants
-HOME_USER_D=$(sudo -u "${1}" sh -c 'echo $HOME')
+HOME_USER_D=$(sudo -u "${CONFIG_USER}" sh -c 'echo $HOME')
 HOME_ROOT_D=$(sudo -u root sh -c 'echo $HOME')
 HELPER_F="${HOME_USER_D}/.${SCRIPT_NAME}_progress"
 SYSCTLD_D="/etc/sysctl.d"
-SYSCTLD_NETWORK_CONF_F="${SYSCTLD_D}/21-${1}_network.conf"
-SUDOERS_F="/etc/sudoers.d/11-${1}"
+SYSCTLD_NETWORK_CONF_F="${SYSCTLD_D}/21-${CONFIG_USER}_network.conf"
 BOOT_CMDLINE_F="/boot/cmdline.txt"
 NANO_CONF_F=".nanorc"
 NANO_CONF_USER_F="${HOME_USER_D}/${NANO_CONF_F}"
 NANO_CONF_ROOT_F="${HOME_ROOT_D}/${NANO_CONF_F}"
 TRIM_RULES_F="/etc/udev/rules.d/11-trim_samsung.rules"
 RESOLVED_CONFS_D="/etc/systemd/resolved.conf.d"
-RESOLVED_CONF_F="${RESOLVED_CONFS_D}/resolved-${1}.conf"
+RESOLVED_CONF_F="${RESOLVED_CONFS_D}/resolved-${CONFIG_USER}.conf"
 RESOLV_CONF_F="/etc/resolv.conf"
 STUB_RESOLV_F="/run/systemd/resolve/stub-resolv.conf"
 SSH_ROOT_D="${HOME_ROOT_D}/.ssh"
@@ -83,133 +83,117 @@ SSH_KNOWN_HOSTS_ROOT_F="${SSH_ROOT_D}/known_hosts"
 SYSTEMD_NETWORK_D="/etc/systemd/network/"
 DHCPD_CONF_F="/etc/dhcpcd.conf"
 TIMESYNCD_CONFS_D="/etc/systemd/timesyncd.conf.d"
-TIMESYNCD_CONF_F="${TIMESYNCD_CONFS_D}/timesyncd-${1}.conf"
-
-# Import config file
-if [ -f "${CONFIG_F}" ]; then
-    echo "Config file found... importing it"
-    # shellcheck source=init.conf
-    . "${CONFIG_F}"
-else
-    echo "Config file not found... proceeding to manual config"
-fi
+TIMESYNCD_CONF_F="${TIMESYNCD_CONFS_D}/timesyncd-${CONFIG_USER}.conf"
 
 # Create helper file if not found
-if [ ! -f "${HELPER_F}" ]; then
-    echo "0" | sudo -u "${1}" tee "${HELPER_F}" >/dev/null
+if [ ! -f "$HELPER_F" ]; then
+    echo "0" | sudo -u "$CONFIG_USER" tee "$HELPER_F" >/dev/null
 fi
 
-helper_f_content=$(<"${HELPER_F}")
+helper_f_content=$(<"$HELPER_F")
 
-if [[ "${helper_f_content}" == "2" ]]; then
+if [[ "$helper_f_content" == "2" ]]; then
     echo "All config already done, exiting."
     exit 3
 
 # First pass
-elif [[ "${helper_f_content}" == "0" ]]; then
+elif [[ "$helper_f_content" == "0" ]]; then
 
     echo -e "\nFirst init pass"
 
     # Rfkill - block wireless devices
     if checkConfig "CONFIG_INIT_RFKILL"; then
         # shellcheck source=rfkill.sh
-        . "${RFKILL_F}"
+        . "$RFKILL_F"
         blockRf
     fi
 
     # Journal - limit size
     if checkConfig "CONFIG_INIT_JOURNAL_LIMIT"; then
         # shellcheck source=journal_limit.sh
-        . "${JOURNAL_LIMIT_F}"
+        . "$JOURNAL_LIMIT_F"
         limitJournal
     fi
 
     # RAM - set swappiness
     if checkConfig "CONFIG_INIT_RAM_SWAPPINESS_CUSTOMIZE"; then
         # shellcheck source=swappiness.sh
-        . "${SWAPPINESS_F}"
+        . "$SWAPPINESS_F"
         setSwappiness
     fi
 
     # Pacman - set mirrors
     if checkConfig "CONFIG_INIT_PACMAN_SET_MIRROR_COUNTRIES"; then
         # shellcheck source=pacman_countries.sh
-        . "${PACMAN_COUNTRIES_F}"
+        . "$PACMAN_COUNTRIES_F"
         setPacmanCountries
     fi
 
     # Pacman - update
     echo -e "\n\nUpdating packages"
-    # FIXME: noconfirm doesn't work with packages like linux-rpi4-mainline due to incompatibilites with installed packages
+    # TODO: noconfirm doesn't work with packages like linux-rpi4-mainline due to incompatibilites with installed packages
     pacman -Syyuu
     echo "Packages updated"
 
     # Pacman - enable colored output
     if checkConfig "CONFIG_INIT_PACMAN_ENABLE_COLORS"; then
         # shellcheck source=pacman_colors.sh
-        . "${PACMAN_COLORS_F}"
+        . "$PACMAN_COLORS_F"
         setPacmanColors
     fi
 
     # Pacman - install packages
     if checkConfig "CONFIG_INIT_PACMAN_INSTALL_PACKAGES"; then
         # shellcheck source=pacman_install_pkgs.sh
-        . "${PACMAN_INSTALL_PKGS_F}"
+        . "$PACMAN_INSTALL_PKGS_F"
         installPacmanPackages
     fi
 
     # Pacman - cleanup
     if checkConfig "CONFIG_INIT_PACMAN_CLEANUP"; then
         # shellcheck source=pacman_cleanup.sh
-        . "${PACMAN_CLEANUP_F}"
+        . "$PACMAN_CLEANUP_F"
         pacmanCleanup
     fi
 
     # Rpi - EEPROM update branch
     if checkConfig "CONFIG_INIT_RPI_EEPROM_BRANCH_CHANGE"; then
         # shellcheck source=rpi_eeprom_branch.sh
-        . "${RPI_EEPROM_BRANCH_F}"
+        . "$RPI_EEPROM_BRANCH_F"
         changeEepromBranch
     fi
 
     # Rpi - EEPROM update check
     if checkConfig "CONFIG_INIT_RPI_EEPROM_UPDATE_CHECK"; then
         # shellcheck source=rpi_eeprom_update.sh
-        . "${RPI_EEPROM_UPDATE_F}"
+        . "$RPI_EEPROM_UPDATE_F"
         updateEeprom
     fi
 
     # Rpi - Overclock
     if checkConfig "CONFIG_INIT_RPI_OVERCLOCK_ENABLE"; then
         # shellcheck source=rpi_overclock.sh
-        . "${RPI_OVERCLOCK_F}"
+        . "$RPI_OVERCLOCK_F"
         goFaster
     fi
 
     # User - add to groups
     if checkConfig "CONFIG_INIT_USER_ADD_TO_GROUPS"; then
         # shellcheck source=user_groups.sh
-        . "${USER_GROUPS_F}"
+        . "$USER_GROUPS_F"
         adsUserToGroups
     fi
 
     # User - sudo without password
-    if checkConfig "CONFIG_USER_SUDO_WITHOUT_PWD"; then
-        echo -e "\n\nSetting sudo without password for ${1}"
-        if [ ! -f "${SUDOERS_F}" ]; then
-            echo "${SUDOERS_F} doesn't exist."
-            echo "${1} ALL=(ALL) NOPASSWD: ALL" | tee "${SUDOERS_F}" >/dev/null
-            chmod 750 "${SUDOERS_F}"
-            echo "${1} can run sudo without password from the next boot."
-        else
-            echo "${SUDOERS_F} already exists, please check"
-            paktc
-        fi
+    if checkConfig "CONFIG_INIT_USER_SUDO_WITHOUT_PWD"; then
+        # shellcheck source=user_passwordless_sudo.sh
+        . "$USER_PASSWRODLESS_SUDO"
+        enablePasswordlessSudo
     fi
 
     # Nano - enable syntax highlighting
     if checkConfig "CONFIG_NANO_ENABLE_SYNTAX_HIGHLIGHTING"; then
-        echo -e "\n\nEnabling Nano Syntax highlighting for root and ${1}"
+        echo -e "\n\nEnabling Nano Syntax highlighting for root and ${CONFIG_USER}"
         if [ ! -f "${NANO_CONF_ROOT_F}" ] || ! grep -q 'include "/usr/share/nano/\*.nanorc' "${NANO_CONF_ROOT_F}"; then
             echo -e 'include "/usr/share/nano/*.nanorc"\nset linenumbers' | tee -a "${NANO_CONF_ROOT_F}" >/dev/null
         else
@@ -217,7 +201,7 @@ elif [[ "${helper_f_content}" == "0" ]]; then
             paktc
         fi
         if [ ! -f "${NANO_CONF_USER_F}" ] || ! grep -q 'include "/usr/share/nano/\*.nanorc' "${NANO_CONF_USER_F}"; then
-            echo -e 'include "/usr/share/nano/*.nanorc"\nset linenumbers' | sudo -u "${1}" tee -a "${NANO_CONF_USER_F}" >/dev/null
+            echo -e 'include "/usr/share/nano/*.nanorc"\nset linenumbers' | sudo -u "${CONFIG_USER}" tee -a "${NANO_CONF_USER_F}" >/dev/null
         else
             echo "${NANO_CONF_USER_F} already configured"
             paktc
@@ -252,18 +236,18 @@ net.core.wmem_max = 8388608" | tee -a "${SYSCTLD_NETWORK_CONF_F}" >/dev/null
 Name=${CONFIG_NETWORK_MACVLAN_PARENT}
 
 [Network]
-MACVLAN=macvlan-${1}" | tee "${SYSTEMD_NETWORK_D}/${CONFIG_NETWORK_MACVLAN_PARENT}.network" >/dev/null
+MACVLAN=macvlan-${CONFIG_USER}" | tee "${SYSTEMD_NETWORK_D}/${CONFIG_NETWORK_MACVLAN_PARENT}.network" >/dev/null
 
         echo \
             "[NetDev]
-Name=macvlan-${1}
+Name=macvlan-${CONFIG_USER}
 Kind=macvlan
 
 [MACVLAN]
-Mode=bridge" | tee "${SYSTEMD_NETWORK_D}/macvlan-${1}.netdev" >/dev/null
+Mode=bridge" | tee "${SYSTEMD_NETWORK_D}/macvlan-${CONFIG_USER}.netdev" >/dev/null
         echo \
             "[Match]
-Name=macvlan-${1}
+Name=macvlan-${CONFIG_USER}
 
 [Route]
 Destination=${CONFIG_NETWORK_MACVLAN_RANGE}
@@ -272,8 +256,8 @@ Destination=${CONFIG_NETWORK_MACVLAN_RANGE}
 DHCP=no
 Address=${CONFIG_NETWORK_MACVLAN_STATIC_IP}/32
 IPForward=yes
-ConfigureWithoutCarrier=yes" | tee "${SYSTEMD_NETWORK_D}/macvlan-${1}.network" >/dev/null
-        echo -e "# Custom config by ${1}\ndenyinterfaces macvlan-${1}" | tee -a "${DHCPD_CONF_F}" >/dev/null
+ConfigureWithoutCarrier=yes" | tee "${SYSTEMD_NETWORK_D}/macvlan-${CONFIG_USER}.network" >/dev/null
+        echo -e "# Custom config by ${CONFIG_USER}\ndenyinterfaces macvlan-${CONFIG_USER}" | tee -a "${DHCPD_CONF_F}" >/dev/null
         echo -e "[Service]\nExecStart=\nExecStart=/usr/lib/systemd/systemd-networkd-wait-online --any" | SYSTEMD_EDITOR="tee" systemctl edit systemd-networkd-wait-online.service
         systemctl daemon-reload
         echo -e "\nMacVLAN setup done"
@@ -294,7 +278,7 @@ net.ipv6.conf.default.disable_ipv6 = 1" | tee -a "${SYSCTLD_NETWORK_CONF_F}" >/d
 IPv6AcceptRA=no" | tee -a "${SYSTEMD_NETWORK_D}/${CONFIG_NETWORK_MACVLAN_PARENT}.network" >/dev/null
         echo \
             "LinkLocalAddressing=no
-IPv6AcceptRA=no" | tee -a "${SYSTEMD_NETWORK_D}/macvlan-${1}.network" >/dev/null
+IPv6AcceptRA=no" | tee -a "${SYSTEMD_NETWORK_D}/macvlan-${CONFIG_USER}.network" >/dev/null
         echo \
             "ipv4only
 noipv6rs
@@ -351,17 +335,17 @@ FallbackNTP=${CONFIG_NTP_FALLBACK_SERVERS:-pool.ntp.org}
     fi
 
     # SSH
-    echo -e "\n\nAdding .ssh user folder for root and ${1}"
+    echo -e "\n\nAdding .ssh user folder for root and ${CONFIG_USER}"
     mkdir -p "${SSH_ROOT_D}"
-    sudo -u "${1}" mkdir -p "${SSH_USER_D}"
+    sudo -u "${CONFIG_USER}" mkdir -p "${SSH_USER_D}"
     chmod 700 "${SSH_ROOT_D}" "${SSH_USER_D}"
     echo ".ssh folders added"
 
     if checkConfig "CONFIG_SSH_KEYS_ADD"; then
         echo -e "\n\nAdding SSH keys"
-        echo -e "Please insert public SSH key for ${1} and press Enter\nEG: ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIB8Ht8Z3j6yDWPBHQtOp/R9rjWvfMYo3MSA/K6q8D86r"
+        echo -e "Please insert public SSH key for ${CONFIG_USER} and press Enter\nEG: ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIB8Ht8Z3j6yDWPBHQtOp/R9rjWvfMYo3MSA/K6q8D86r"
         read -r
-        echo "${REPLY}" | sudo -u "${1}" tee -a "${SSH_AUTHORIZED_KEY_USER_F}" >/dev/null
+        echo "${REPLY}" | sudo -u "${CONFIG_USER}" tee -a "${SSH_AUTHORIZED_KEY_USER_F}" >/dev/null
         echo -e "Please insert public SSH key for root user and press Enter\nKeep blank to skip\nEG: ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIB8Ht8Z3j6yDWPBHQtOp/R9rjWvfMYo3MSA/K6q8D86r"
         read -r
         echo "${REPLY}" | tee -a "${SSH_AUTHORIZED_KEY_ROOT_F}" >/dev/null
@@ -373,7 +357,7 @@ FallbackNTP=${CONFIG_NTP_FALLBACK_SERVERS:-pool.ntp.org}
         ssh-keyscan "${CONFIG_SSH_HOSTS[@]}" | tee "${SSH_KNOWN_HOSTS_ROOT_F}" >/dev/null
         mkdir -p "${SSH_USER_D}"
         cp "${SSH_KNOWN_HOSTS_ROOT_F}" "${SSH_KNOWN_HOSTS_USER_F}"
-        chown "${1}:${1}" "${SSH_KNOWN_HOSTS_USER_F}"
+        chown "${CONFIG_USER}:${CONFIG_USER}" "${SSH_KNOWN_HOSTS_USER_F}"
         chmod 600 "${SSH_AUTHORIZED_KEY_ROOT_F}" "${SSH_AUTHORIZED_KEY_USER_F}" "${SSH_KNOWN_HOSTS_ROOT_F}" "${SSH_KNOWN_HOSTS_USER_F}"
         echo "SSH useful known hosts added"
     fi
@@ -445,7 +429,7 @@ DNSStubListener=no
     fi
 
     # Pass 1 done
-    echo "1" | sudo -u "${1}" tee "${HELPER_F}"
+    echo "1" | sudo -u "${CONFIG_USER}" tee "${HELPER_F}"
     echo -e "\n\nFirst part of the config done"
     echo "Please check sshd config using 'sudo sshd -t' command and fix any problem before rebooting"
     echo "If the command sudo sshd -t has no output the config is ok"
@@ -461,27 +445,27 @@ elif [[ "${helper_f_content}" == "1" ]]; then
         echo -e "\n\nDocker login"
         echo "Please prepare docker hub user and password"
         paktc
-        sudo -u "${1}" docker login
+        sudo -u "${CONFIG_USER}" docker login
     fi
 
     # Docker - custom bridge network
     if checkConfig "CONFIG_DOCKER_NETWORK_ADD_CUSTOM_BRIDGE"; then
-        echo -e "\n\nCreating Docker custom bridge network bridge_${1}"
-        sudo -u "${1}" docker network create "bridge_${1}"
+        echo -e "\n\nCreating Docker custom bridge network bridge_${CONFIG_USER}"
+        sudo -u "${CONFIG_USER}" docker network create "bridge_${CONFIG_USER}"
         echo "Docker custom bridge network created"
     fi
 
     # Docker - add MACVLAN network
     if checkConfig "CONFIG_DOCKER_NETWORK_ADD_MACVLAN"; then
-        echo -e "\n\nCreating Docker custom MACVLAN network macvlan_${1}"
-        sudo -u "${1}" docker network create "bridge_${1}"
-        sudo -u "${1}" docker network create -d macvlan \
+        echo -e "\n\nCreating Docker custom MACVLAN network macvlan_${CONFIG_USER}"
+        sudo -u "${CONFIG_USER}" docker network create "bridge_${CONFIG_USER}"
+        sudo -u "${CONFIG_USER}" docker network create -d macvlan \
             --subnet="${CONFIG_NETWORK_MACVLAN_SUBNET}" \
             --ip-range="${CONFIG_NETWORK_MACVLAN_RANGE}" \
             --gateway="${CONFIG_NETWORK_MACVLAN_GATEWAY}" \
             -o parent="${CONFIG_NETWORK_MACVLAN_PARENT}" \
             --aux-address="macvlan_bridge=${CONFIG_NETWORK_MACVLAN_STATIC_IP}" \
-            "macvlan_${1}"
+            "macvlan_${CONFIG_USER}"
         echo "Docker custom MACVLAN network created"
     fi
 
@@ -499,7 +483,7 @@ elif [[ "${helper_f_content}" == "1" ]]; then
     if checkConfig "CONFIG_DOCKER_COMPOSE_START"; then
         echo -e "\n\nStarting docker compose"
         if [ -f "${CONFIG_DOCKER_COMPOSE_FILE_PATH}" ]; then
-            sudo -u "${1}" docker compose -f "${CONFIG_DOCKER_COMPOSE_FILE_PATH}" up -d
+            sudo -u "${CONFIG_USER}" docker compose -f "${CONFIG_DOCKER_COMPOSE_FILE_PATH}" up -d
             echo -e "\nServices in ${CONFIG_DOCKER_COMPOSE_FILE_PATH} compose file should be up and running"
         else
             echo "Cannot find ${CONFIG_DOCKER_COMPOSE_FILE_PATH} compose file, please check"
@@ -507,7 +491,7 @@ elif [[ "${helper_f_content}" == "1" ]]; then
         fi
     fi
 
-    echo "2" | sudo -u "${1}" tee "${HELPER_F}"
+    echo "2" | sudo -u "${CONFIG_USER}" tee "${HELPER_F}"
     echo -e "\n\nSecond part of the config done"
     exit 0
 fi
