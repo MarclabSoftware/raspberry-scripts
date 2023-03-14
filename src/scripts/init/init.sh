@@ -18,6 +18,7 @@ PACMAN_COLORS_F="${SCRIPT_D}/pacman_colors.sh"
 PACMAN_INSTALL_PKGS_F="${SCRIPT_D}/pacman_install_pkgs.sh"
 
 # Source utils
+# shellcheck source=utils.sh
 . "${UTILS_F}"
 
 clear
@@ -82,6 +83,7 @@ TIMESYNCD_CONF_F="${TIMESYNCD_CONFS_D}/timesyncd-${1}.conf"
 # Import config file
 if [ -f "${CONFIG_F}" ]; then
     echo "Config file found... importing it"
+    # shellcheck source=init.conf
     . "${CONFIG_F}"
 else
     echo "Config file not found... proceeding to manual config"
@@ -105,24 +107,28 @@ elif [[ "${helper_f_content}" == "0" ]]; then
 
     # Rfkill - block wireless devices
     if checkConfig "CONFIG_INIT_RFKILL"; then
+        # shellcheck source=rfkill.sh
         . "${RFKILL_F}"
         blockRf
     fi
 
     # Journal - limit size
     if checkConfig "CONFIG_INIT_JOURNAL_LIMIT"; then
+        # shellcheck source=journal_limit.sh
         . "${JOURNAL_LIMIT_F}"
         limitJournal
     fi
 
     # RAM - set swappiness
     if checkConfig "CONFIG_INIT_RAM_SWAPPINESS_CUSTOMIZE"; then
+        # shellcheck source=swappiness.sh
         . "${SWAPPINESS_F}"
         setSwappiness
     fi
 
     # Pacman - set mirrors
     if checkConfig "CONFIG_INIT_PACMAN_SET_MIRROR_COUNTRIES"; then
+        # shellcheck source=pacman_countries.sh
         . "${PACMAN_COUNTRIES_F}"
         setPacmanCountries
     fi
@@ -135,12 +141,14 @@ elif [[ "${helper_f_content}" == "0" ]]; then
 
     # Pacman - enable colored output
     if checkConfig "CONFIG_INIT_PACMAN_ENABLE_COLORS"; then
+        # shellcheck source=pacman_colors.sh
         . "${PACMAN_COLORS_F}"
         setPacmanColors
     fi
 
     # Pacman - install packages
     if checkConfig "CONFIG_INIT_PACMAN_INSTALL_PACKAGES"; then
+        # shellcheck source=pacman_install_pkgs.sh
         . "${PACMAN_INSTALL_PKGS_F}"
         installPacmanPackages
     fi
