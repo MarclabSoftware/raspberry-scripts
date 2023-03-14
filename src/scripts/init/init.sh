@@ -140,7 +140,7 @@ elif [[ "${helper_f_content}" == "0" ]]; then
     # Pacman - update
     echo -e "\n\nUpdating packages"
     # FIXME: noconfirm doesn't work with packages like linux-rpi4-mainline due to incompatibilites with installed packages
-    pacman -Syyuu --noconfirm
+    pacman -Syyuu
     echo "Packages updated"
 
     # Pacman - enable colored output
