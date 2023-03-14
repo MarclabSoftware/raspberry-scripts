@@ -24,6 +24,7 @@ RPI_EEPROM_UPDATE_F="${SCRIPT_D}/rpi_eeprom_update.sh"
 RPI_OVERCLOCK_F="${SCRIPT_D}/rpi_overclock.sh"
 USER_GROUPS_F="${SCRIPT_D}/user_groups.sh"
 USER_PASSWRODLESS_SUDO="${SCRIPT_D}/user_passwordless_sudo.sh"
+NANO_SYNTAX_HIGHLIGHTING_F="${SCRIPT_D}/nano_syntax_highlighting.sh"
 
 # Source utils
 # shellcheck source=utils.sh
@@ -193,20 +194,9 @@ elif [[ "$helper_f_content" == "0" ]]; then
 
     # Nano - enable syntax highlighting
     if checkConfig "CONFIG_INIT_NANO_ENABLE_SYNTAX_HIGHLIGHTING"; then
-        echo -e "\n\nEnabling Nano Syntax highlighting for root and ${CONFIG_USER}"
-        if [ ! -f "${NANO_CONF_ROOT_F}" ] || ! grep -q 'include "/usr/share/nano/\*.nanorc' "${NANO_CONF_ROOT_F}"; then
-            echo -e 'include "/usr/share/nano/*.nanorc"\nset linenumbers' | tee -a "${NANO_CONF_ROOT_F}" >/dev/null
-        else
-            echo "${NANO_CONF_ROOT_F} already configured"
-            paktc
-        fi
-        if [ ! -f "${NANO_CONF_USER_F}" ] || ! grep -q 'include "/usr/share/nano/\*.nanorc' "${NANO_CONF_USER_F}"; then
-            echo -e 'include "/usr/share/nano/*.nanorc"\nset linenumbers' | sudo -u "${CONFIG_USER}" tee -a "${NANO_CONF_USER_F}" >/dev/null
-        else
-            echo "${NANO_CONF_USER_F} already configured"
-            paktc
-        fi
-        echo -e "\nNano Syntax highlighting enabled"
+        # shellcheck source=nano_syntax_highlighting.sh
+        . "$NANO_SYNTAX_HIGHLIGHTING_F"
+        enableNanoSyntaxHighlighting
     fi
 
     # Network - optimizations
