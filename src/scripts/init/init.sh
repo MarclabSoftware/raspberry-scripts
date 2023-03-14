@@ -9,6 +9,8 @@ NC='\033[0m'       # No color
 SCRIPT_D=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" &>/dev/null && pwd)
 SCRIPT_NAME=$(basename "$(readlink -f "${0}")" .sh)
 CONFIG_F="${SCRIPT_D}/${SCRIPT_NAME}.conf"
+
+# External scripts
 UTILS_F="${SCRIPT_D}/utils.sh"
 RFKILL_F="${SCRIPT_D}/rfkill.sh"
 JOURNAL_LIMIT_F="${SCRIPT_D}/journal_limit.sh"
@@ -16,6 +18,7 @@ SWAPPINESS_F="${SCRIPT_D}/swappiness.sh"
 PACMAN_COUNTRIES_F="${SCRIPT_D}/pacman_countries.sh"
 PACMAN_COLORS_F="${SCRIPT_D}/pacman_colors.sh"
 PACMAN_INSTALL_PKGS_F="${SCRIPT_D}/pacman_install_pkgs.sh"
+PACMAN_CLEANUP_F="${SCRIPT_D}/pacman_cleanup.sh"
 
 # Source utils
 # shellcheck source=utils.sh
@@ -154,14 +157,11 @@ elif [[ "${helper_f_content}" == "0" ]]; then
     fi
 
     # Pacman - cleanup
-    echo -e "\n\nRemoving orphaned packages"
-    pacman -Qtdq | pacman --noconfirm -Rns -
-    echo "Orphaned packages removed"
-
-    echo -e "\n\nRemoving unneded cached packages"
-    paccache -rk1
-    paccache -ruk0
-    echo "Unneded cached packages removed"
+    if checkConfig "CONFIG_INIT_PACMAN_CLEANUP"; then
+        # shellcheck source=pacman_cleanup.sh
+        . "${PACMAN_CLEANUP_F}"
+        pacmanCleanup
+    fi
 
     # Rpi - EEPROM update
     if checkConfig "CONFIG_RPI_EEPROM_BRANCH_CHANGE"; then
