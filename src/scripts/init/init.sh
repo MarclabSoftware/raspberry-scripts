@@ -20,7 +20,8 @@ PACMAN_COLORS_F="${SCRIPT_D}/pacman_colors.sh"
 PACMAN_INSTALL_PKGS_F="${SCRIPT_D}/pacman_install_pkgs.sh"
 PACMAN_CLEANUP_F="${SCRIPT_D}/pacman_cleanup.sh"
 RPI_EEPROM_BRANCH_F="${SCRIPT_D}/rpi_eeprom_branch.sh"
-RPI_EEPROM_update_F="${SCRIPT_D}/rpi_eeprom_update.sh"
+RPI_EEPROM_UPDATE_F="${SCRIPT_D}/rpi_eeprom_update.sh"
+RPI_OVERCLOCK_F="${SCRIPT_D}/rpi_overclock.sh"
 
 # Source utils
 # shellcheck source=utils.sh
@@ -61,7 +62,6 @@ HELPER_F="${HOME_USER_D}/.${SCRIPT_NAME}_progress"
 SYSCTLD_D="/etc/sysctl.d"
 SYSCTLD_NETWORK_CONF_F="${SYSCTLD_D}/21-${1}_network.conf"
 SUDOERS_F="/etc/sudoers.d/11-${1}"
-BOOT_CONF_F="/boot/config.txt"
 BOOT_CMDLINE_F="/boot/cmdline.txt"
 NANO_CONF_F=".nanorc"
 NANO_CONF_USER_F="${HOME_USER_D}/${NANO_CONF_F}"
@@ -174,27 +174,15 @@ elif [[ "${helper_f_content}" == "0" ]]; then
     # Rpi - EEPROM update check
     if checkConfig "CONFIG_INIT_RPI_EEPROM_UPDATE_CHECK"; then
         # shellcheck source=rpi_eeprom_update.sh
-        . "${RPI_EEPROM_update_F}"
+        . "${RPI_EEPROM_UPDATE_F}"
         updateEeprom
     fi
 
     # Rpi - Overclock
-    if checkConfig "CONFIG_RPI_OVERCLOCK_ENABLE"; then
-        echo -e "\n\nSetting overclock"
-        if ! grep -q "# Overclock-${1}" "${BOOT_CONF_F}"; then
-            echo "Overclock config not found"
-            cp -a "${BOOT_CONF_F}" "${BOOT_CONF_F}.bak"
-            echo "Boot config file backed up at ${BOOT_CONF_F}.bak"
-            echo \
-                "# Overclock-${1}
-    over_voltage=${CONFIG_RPI_OVERCLOCK_OVER_VOLTAGE:-6}
-    arm_freq=${CONFIG_RPI_OVERCLOCK_ARM_FREQ:-2000}
-    gpu_freq=${CONFIG_RPI_OVERCLOCK_GPU_FREQ:-750}" | tee -a "${BOOT_CONF_F}" >/dev/null
-            echo "Overclock will be applied at the next boot"
-        else
-            echo "Overclock config is already present in ${BOOT_CONF_F}, please check"
-            paktc
-        fi
+    if checkConfig "CONFIG_INIT_RPI_OVERCLOCK_ENABLE"; then
+        # shellcheck source=rpi_overclock.sh
+        . "${RPI_OVERCLOCK_F}"
+        goFaster
     fi
 
     # User - add to groups
