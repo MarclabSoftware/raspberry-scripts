@@ -60,8 +60,14 @@ isVarSet() {
     declare -p "$1" &>/dev/null
 }
 
+# Returns 0 if a var is unset or if it's set but has no value assigned
+isVarEmpty() {
+    [ -z "$1" ] && return 0
+    return 1
+}
+
 # Return type of a variable, input arg is var name, bash only
-varType() {
+getVarType() {
     if ! isVarSet "$1"; then
         echo "UNSET"
         return 1
@@ -95,8 +101,26 @@ varType() {
 }
 
 # Check if a var is an array, input arg is var name, bash only
-isArray() {
-    if (varType "$1" | grep -q "ARRAY"); then
+isVarArray() {
+    if (getVarType "$1" | grep -q "ARRAY"); then
+        return 0
+    fi
+    return 1
+}
+
+# Check if a var is int, input arg is var name, bash only
+isVarInt() {
+    if (getVarType "$1" | grep -q "INT"); then
+        return 0
+    fi
+    return 1
+}
+
+
+# Check if a var is other, input arg is var name, bash only
+# Userful for strings
+isVarOther() {
+    if (getVarType "$1" | grep -q "OTHER"); then
         return 0
     fi
     return 1
