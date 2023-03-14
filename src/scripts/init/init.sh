@@ -26,6 +26,7 @@ USER_GROUPS_F="${SCRIPT_D}/user_groups.sh"
 USER_PASSWRODLESS_SUDO="${SCRIPT_D}/user_passwordless_sudo.sh"
 NANO_SYNTAX_HIGHLIGHTING_F="${SCRIPT_D}/nano_syntax_highlighting.sh"
 NETWORK_OPTIMIZATIONS_F="${SCRIPT_D}/network_optimization.sh"
+NETWORK_ROUTUNG_F="${SCRIPT_D}/network_routing.sh"
 
 # Source utils
 # shellcheck source=utils.sh
@@ -199,16 +200,16 @@ elif [[ "$helper_f_content" == "0" ]]; then
 
     # Network - optimizations
     if checkConfig "CONFIG_INIT_NETWORK_OPTIMIZATIONS"; then
-        # shellcheck source=nano_syntax_highlighting.sh
+        # shellcheck source=network_optimization.sh
         . "$NETWORK_OPTIMIZATIONS_F"
         optimizeNetwork
     fi
 
     # Network - enable routing
     if checkConfig "CONFIG_INIT_NETWORK_ROUTING_ENABLE"; then
-        echo -e "\n\nAdding network confs to ${SYSCTLD_NETWORK_CONF_F}"
-        echo "net.ipv4.ip_forward = 1" | tee -a "${SYSCTLD_NETWORK_CONF_F}" >/dev/null
-        echo "Routing enabled"
+        # shellcheck source=network_routing.sh
+        . "$NETWORK_ROUTUNG_F"
+        enableRouting
     fi
 
     # Network - MACVLAN host <-> docker bridge
