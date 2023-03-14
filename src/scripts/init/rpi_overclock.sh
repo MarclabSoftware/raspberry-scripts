@@ -14,9 +14,9 @@ addIfNotFound() {
 
 goFaster() {
     # Defaults
-    local config_ov_default=0
-    local config_arm_freq_default=1500
-    local config_gpu_freq_default=500
+    local config_ov_default=6
+    local config_arm_freq_default=2000
+    local config_gpu_freq_default=750
 
     # Apply default if conf is not found
     local ov="${CONFIG_RPI_OVERCLOCK_OVER_VOLTAGE:=$config_ov_default}"
