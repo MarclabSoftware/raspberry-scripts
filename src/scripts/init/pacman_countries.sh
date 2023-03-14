@@ -14,7 +14,7 @@ setPacmanCountries() {
     fi
 
     echo "Using ${coutries} as mirrors"
-    pacman-mirrors --country "${coutries}"
+    pacman-mirrors --country "$coutries"
     echo "Pacman mirrors updated"
 
     return 0
@@ -23,7 +23,7 @@ setPacmanCountries() {
 # Check if script is executed or sourced
 (return 0 2>/dev/null) && sourced=true || sourced=false
 
-if [ "${sourced}" = false ]; then
+if [ "$sourced" = false ]; then
     SCRIPT_D=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" &>/dev/null && pwd)
     # Source needed files
     . "${SCRIPT_D}/init.conf"

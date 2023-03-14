@@ -5,10 +5,10 @@
 # $2: conf file
 # $3: conf value
 addIfNotFound() {
-    if grep -q "${1}" "${2}"; then
-        sed -i "s/.*${1}.*/${1}=${3}/" "${2}"
+    if grep -q "$1" "$2"; then
+        sed -i "s/.*${1}.*/${1}=${3}/" "$2"
     else
-        echo "${1}=${3}" | tee -a "${2}" >/dev/null
+        echo "${1}=${3}" | tee -a "$2" >/dev/null
     fi
 }
 
@@ -28,25 +28,25 @@ goFaster() {
 
     echo -e "\n\nSetting overclock"
 
-    if [ ! -f "${boot_conf_f}" ]; then
+    if [ ! -f "$boot_conf_f" ]; then
         echo "${boot_conf_f} file not found, cannot apply overclock."
         return 1
     fi
 
-    echo "New arm_freq: ${arm_freq}"
-    echo "New gpu_freq: ${gpu_freq}"
-    echo "New ov: ${ov}"
+    echo "New arm_freq: $arm_freq"
+    echo "New gpu_freq: $gpu_freq"
+    echo "New ov: $ov"
 
-    addIfNotFound "over_voltage" "${boot_conf_f}" "${ov}"
-    addIfNotFound "arm_freq" "${boot_conf_f}" "${arm_freq}"
-    addIfNotFound "gpu_freq" "${boot_conf_f}" "${gpu_freq}"
+    addIfNotFound "over_voltage" "$boot_conf_f" "$ov"
+    addIfNotFound "arm_freq" "$boot_conf_f" "$arm_freq"
+    addIfNotFound "gpu_freq" "$boot_conf_f" "$gpu_freq"
     return 0
 }
 
 # Check if script is executed or sourced
 (return 0 2>/dev/null) && sourced=true || sourced=false
 
-if [ "${sourced}" = false ]; then
+if [ "$sourced" = false ]; then
     SCRIPT_D=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" &>/dev/null && pwd)
     # Source needed files
     . "${SCRIPT_D}/init.conf"

@@ -48,7 +48,7 @@ checkConfig() {
 
 # Check if a command exists
 checkCommand() {
-    if ! command -v "${1}" &>/dev/null; then
+    if ! command -v "$1" &>/dev/null; then
         echo "${1} command not found"
         return 1
     fi
@@ -149,10 +149,10 @@ isNormalUser() {
     if isVarEmpty "$1"; then
         return 1
     fi
-    if ! id "${1}" &>/dev/null; then
+    if ! id "$1" &>/dev/null; then
         return 1
     fi
-    if [ "${1}" = "root" ]; then
+    if [ "$1" = "root" ]; then
         return 1
     fi
     return 0

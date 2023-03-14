@@ -9,8 +9,8 @@ setSwappiness() {
     local swappiness="${CONFIG_RAM_SWAPPINESS_VALUE:=$swappiness_default}"
 
     echo -e "\n\nSetting custom swappiness"
-    echo "New swappiness value: ${swappiness}"
-    echo "vm.swappiness=${swappiness}" | tee "${swappiness_conf_f}" >/dev/null
+    echo "New swappiness value: $swappiness"
+    echo "vm.swappiness=$swappiness" | tee "$swappiness_conf_f" >/dev/null
     echo "Custom swappiness set, it will be applied from the next reboot"
     return 0
 }
@@ -18,7 +18,7 @@ setSwappiness() {
 # Check if script is executed or sourced
 (return 0 2>/dev/null) && sourced=true || sourced=false
 
-if [ "${sourced}" = false ]; then
+if [ "$sourced" = false ]; then
     SCRIPT_D=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" &>/dev/null && pwd)
     # Source needed files
     . "${SCRIPT_D}/init.conf"
