@@ -26,7 +26,8 @@ USER_GROUPS_F="${SCRIPT_D}/user_groups.sh"
 USER_PASSWRODLESS_SUDO="${SCRIPT_D}/user_passwordless_sudo.sh"
 NANO_SYNTAX_HIGHLIGHTING_F="${SCRIPT_D}/nano_syntax_highlighting.sh"
 NETWORK_OPTIMIZATIONS_F="${SCRIPT_D}/network_optimization.sh"
-NETWORK_ROUTUNG_F="${SCRIPT_D}/network_routing.sh"
+NETWORK_ROUTING_F="${SCRIPT_D}/network_routing.sh"
+NETWORK_MACVLAN_F="${SCRIPT_D}/network_macvlan.sh"
 
 # Source utils
 # shellcheck source=utils.sh
@@ -208,43 +209,15 @@ elif [[ "$helper_f_content" == "0" ]]; then
     # Network - enable routing
     if checkConfig "CONFIG_INIT_NETWORK_ROUTING_ENABLE"; then
         # shellcheck source=network_routing.sh
-        . "$NETWORK_ROUTUNG_F"
+        . "$NETWORK_ROUTING_F"
         enableRouting
     fi
 
     # Network - MACVLAN host <-> docker bridge
     if checkConfig "CONFIG_INIT_NETWORK_MACVLAN_SETUP"; then
-        echo -e "\n\nMACVLAN host <-> docker bridge setup"
-        echo \
-            "[Match]
-Name=${CONFIG_NETWORK_MACVLAN_PARENT}
-
-[Network]
-MACVLAN=macvlan-${CONFIG_USER}" | tee "${SYSTEMD_NETWORK_D}/${CONFIG_NETWORK_MACVLAN_PARENT}.network" >/dev/null
-
-        echo \
-            "[NetDev]
-Name=macvlan-${CONFIG_USER}
-Kind=macvlan
-
-[MACVLAN]
-Mode=bridge" | tee "${SYSTEMD_NETWORK_D}/macvlan-${CONFIG_USER}.netdev" >/dev/null
-        echo \
-            "[Match]
-Name=macvlan-${CONFIG_USER}
-
-[Route]
-Destination=${CONFIG_NETWORK_MACVLAN_RANGE}
-
-[Network]
-DHCP=no
-Address=${CONFIG_NETWORK_MACVLAN_STATIC_IP}/32
-IPForward=yes
-ConfigureWithoutCarrier=yes" | tee "${SYSTEMD_NETWORK_D}/macvlan-${CONFIG_USER}.network" >/dev/null
-        echo -e "# Custom config by ${CONFIG_USER}\ndenyinterfaces macvlan-${CONFIG_USER}" | tee -a "${DHCPD_CONF_F}" >/dev/null
-        echo -e "[Service]\nExecStart=\nExecStart=/usr/lib/systemd/systemd-networkd-wait-online --any" | SYSTEMD_EDITOR="tee" systemctl edit systemd-networkd-wait-online.service
-        systemctl daemon-reload
-        echo -e "\nMacVLAN setup done"
+        # shellcheck source=network_macvlan.sh
+        . "$NETWORK_MACVLAN_F"
+        enableMacVlan
     fi
 
     # Network - IPv6 Disable
