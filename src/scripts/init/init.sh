@@ -15,6 +15,7 @@ JOURNAL_LIMIT_F="${SCRIPT_D}/journal_limit.sh"
 SWAPPINESS_F="${SCRIPT_D}/swappiness.sh"
 PACMAN_COUNTRIES_F="${SCRIPT_D}/pacman_countries.sh"
 PACMAN_COLORS_F="${SCRIPT_D}/pacman_colors.sh"
+PACMAN_INSTALL_PKGS_F="${SCRIPT_D}/pacman_install_pkgs.sh"
 
 # Source utils
 . "${UTILS_F}"
@@ -139,17 +140,9 @@ elif [[ "${helper_f_content}" == "0" ]]; then
     fi
 
     # Pacman - install packages
-    if checkConfig "CONFIG_PACMAN_INSTALL_PACKAGES"; then
-        if [[ -v CONFIG_PACMAN_PACKAGES[@] ]]; then
-            echo -e "\n\nInstalling new packages"
-            echo "New packages to install: ${CONFIG_PACMAN_PACKAGES[*]}"
-            # FIXME: noconfirm doesn't work with packages like linux-rpi4-mainline due to incompatibilites with installed packages
-            pacman -S --noconfirm --needed "${CONFIG_PACMAN_PACKAGES[@]}"
-            echo "New packages installed"
-        else
-            echo "CONFIG_PACMAN_PACKAGES is not defined or is not an array"
-            paktc
-        fi
+    if checkConfig "CONFIG_INIT_PACMAN_INSTALL_PACKAGES"; then
+        . "${PACMAN_INSTALL_PKGS_F}"
+        installPacmanPackages
     fi
 
     # Pacman - cleanup
