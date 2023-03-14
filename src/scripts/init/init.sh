@@ -25,6 +25,7 @@ RPI_OVERCLOCK_F="${SCRIPT_D}/rpi_overclock.sh"
 USER_GROUPS_F="${SCRIPT_D}/user_groups.sh"
 USER_PASSWRODLESS_SUDO="${SCRIPT_D}/user_passwordless_sudo.sh"
 NANO_SYNTAX_HIGHLIGHTING_F="${SCRIPT_D}/nano_syntax_highlighting.sh"
+NETWORK_OPTIMIZATIONS_F="${SCRIPT_D}/network_optimization.sh"
 
 # Source utils
 # shellcheck source=utils.sh
@@ -65,9 +66,6 @@ HELPER_F="${HOME_USER_D}/.${SCRIPT_NAME}_progress"
 SYSCTLD_D="/etc/sysctl.d"
 SYSCTLD_NETWORK_CONF_F="${SYSCTLD_D}/21-${CONFIG_USER}_network.conf"
 BOOT_CMDLINE_F="/boot/cmdline.txt"
-NANO_CONF_F=".nanorc"
-NANO_CONF_USER_F="${HOME_USER_D}/${NANO_CONF_F}"
-NANO_CONF_ROOT_F="${HOME_ROOT_D}/${NANO_CONF_F}"
 TRIM_RULES_F="/etc/udev/rules.d/11-trim_samsung.rules"
 RESOLVED_CONFS_D="/etc/systemd/resolved.conf.d"
 RESOLVED_CONF_F="${RESOLVED_CONFS_D}/resolved-${CONFIG_USER}.conf"
@@ -201,14 +199,9 @@ elif [[ "$helper_f_content" == "0" ]]; then
 
     # Network - optimizations
     if checkConfig "CONFIG_INIT_NETWORK_OPTIMIZATIONS"; then
-        echo -e "\n\nAdding network confs to ${SYSCTLD_NETWORK_CONF_F}"
-        echo \
-            "# Improve Network performance
-# This sets the max OS receive buffer size for all types of connections.
-net.core.rmem_max = 8388608
-# This sets the max OS send buffer size for all types of connections.
-net.core.wmem_max = 8388608" | tee -a "${SYSCTLD_NETWORK_CONF_F}" >/dev/null
-        echo "Network optimizations done"
+        # shellcheck source=nano_syntax_highlighting.sh
+        . "$NETWORK_OPTIMIZATIONS_F"
+        optimizeNetwork
     fi
 
     # Network - enable routing
