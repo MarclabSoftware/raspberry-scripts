@@ -19,6 +19,7 @@ PACMAN_COUNTRIES_F="${SCRIPT_D}/pacman_countries.sh"
 PACMAN_COLORS_F="${SCRIPT_D}/pacman_colors.sh"
 PACMAN_INSTALL_PKGS_F="${SCRIPT_D}/pacman_install_pkgs.sh"
 PACMAN_CLEANUP_F="${SCRIPT_D}/pacman_cleanup.sh"
+RPI_EEPROM_BRANCH_F="${SCRIPT_D}/rpi_eeprom_branch.sh"
 
 # Source utils
 # shellcheck source=utils.sh
@@ -64,7 +65,6 @@ BOOT_CMDLINE_F="/boot/cmdline.txt"
 NANO_CONF_F=".nanorc"
 NANO_CONF_USER_F="${HOME_USER_D}/${NANO_CONF_F}"
 NANO_CONF_ROOT_F="${HOME_ROOT_D}/${NANO_CONF_F}"
-EEPROM_UPDATE_F="/etc/default/rpi-eeprom-update"
 TRIM_RULES_F="/etc/udev/rules.d/11-trim_samsung.rules"
 RESOLVED_CONFS_D="/etc/systemd/resolved.conf.d"
 RESOLVED_CONF_F="${RESOLVED_CONFS_D}/resolved-${1}.conf"
@@ -163,11 +163,11 @@ elif [[ "${helper_f_content}" == "0" ]]; then
         pacmanCleanup
     fi
 
-    # Rpi - EEPROM update
-    if checkConfig "CONFIG_RPI_EEPROM_BRANCH_CHANGE"; then
-        echo -e "\n\nChanging Rpi EEPROM update channel to '${CONFIG_RPI_EEPROM_UPDATE_BRANCH:-stable}'"
-        sed -i 's/FIRMWARE_RELEASE_STATUS=".*"/FIRMWARE_RELEASE_STATUS="'"${CONFIG_RPI_EEPROM_UPDATE_BRANCH:-stable}"'"/g' "${EEPROM_UPDATE_F}"
-        echo "Rpi EEPROM update channel changed"
+    # Rpi - EEPROM update branch
+    if checkConfig "CONFIG_INIT_RPI_EEPROM_BRANCH_CHANGE"; then
+        # shellcheck source=rpi_eeprom_branch.sh
+        . "${RPI_EEPROM_BRANCH_F}"
+        changeEepromBranch
     fi
 
     # Rpi - EEPROM update check
