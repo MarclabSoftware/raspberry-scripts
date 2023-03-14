@@ -22,6 +22,7 @@ PACMAN_CLEANUP_F="${SCRIPT_D}/pacman_cleanup.sh"
 RPI_EEPROM_BRANCH_F="${SCRIPT_D}/rpi_eeprom_branch.sh"
 RPI_EEPROM_UPDATE_F="${SCRIPT_D}/rpi_eeprom_update.sh"
 RPI_OVERCLOCK_F="${SCRIPT_D}/rpi_overclock.sh"
+USER_GROUPS_F="${SCRIPT_D}/user_groups.sh"
 
 # Source utils
 # shellcheck source=utils.sh
@@ -186,16 +187,10 @@ elif [[ "${helper_f_content}" == "0" ]]; then
     fi
 
     # User - add to groups
-    if checkConfig "CONFIG_USER_ADD_TO_GROUPS"; then
-        if [[ -v CONFIG_USER_GROUPS_TO_ADD[@] ]]; then
-            echo -e "\n\nAdding ${1} to ${CONFIG_USER_GROUPS_TO_ADD[*]} groups"
-            for group in "${CONFIG_USER_GROUPS_TO_ADD[@]}"; do
-                usermod -aG "${group}" "${1}"
-            done
-        else
-            echo "CONFIG_USER_GROUPS_TO_ADD is not defined or is not an array"
-            paktc
-        fi
+    if checkConfig "CONFIG_INIT_USER_ADD_TO_GROUPS"; then
+        # shellcheck source=user_groups.sh
+        . "${USER_GROUPS_F}"
+        adsUserToGroups
     fi
 
     # User - sudo without password
