@@ -6,12 +6,13 @@ setPacmanCountries() {
     # Apply default if conf is not found
     local coutries="${CONFIG_PACMAN_MIRRORS_COUNTRIES:=$countries_default}"
 
+    echo -e "\n\nUpdating pacman mirrors"
+
     if ! checkCommand "pacman-mirrors"; then
-        echo "pacman-mirrors not found"
+        echo "Cannot continue"
         return 1 # Error
     fi
 
-    echo -e "\n\nUpdating pacman mirrors"
     echo "Using ${coutries} as mirrors"
     pacman-mirrors --country "${coutries}"
     echo "Pacman mirrors updated"

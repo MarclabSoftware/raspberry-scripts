@@ -6,7 +6,7 @@ blockRf() {
     declare -n config_interfaces_str="${config_interfaces_name}"
 
     if ! checkCommand "rfkill"; then
-        echo "rfkill not found"
+        echo "Cannot continue"
         return 1 # Error
     fi
 
