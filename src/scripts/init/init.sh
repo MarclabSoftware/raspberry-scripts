@@ -31,6 +31,7 @@ NETWORK_MACVLAN_F="$SCRIPT_D/network_macvlan.sh"
 NETWORK_IPV6_DISABLE_F="$SCRIPT_D/network_ipv6_disable.sh"
 SSD_TRIM_F="$SCRIPT_D/ssd_trim.sh"
 SSD_OPTIMIZATIONS_F="$SCRIPT_D/ssd_optimizations.sh"
+NTP_F="$SCRIPT_D/ntp.sh"
 
 # Source utils
 # shellcheck source=utils.sh
@@ -68,8 +69,6 @@ fi
 HOME_USER_D=$(sudo -u "$CONFIG_USER" sh -c 'echo $HOME')
 HOME_ROOT_D=$(sudo -u root sh -c 'echo $HOME')
 HELPER_F="$HOME_USER_D/.${SCRIPT_NAME}_progress"
-
-TRIM_RULES_F="/etc/udev/rules.d/11-trim_samsung.rules"
 RESOLVED_CONFS_D="/etc/systemd/resolved.conf.d"
 RESOLVED_CONF_F="$RESOLVED_CONFS_D/resolved-$CONFIG_USER.conf"
 RESOLV_CONF_F="/etc/resolv.conf"
@@ -82,8 +81,6 @@ SSH_AUTHORIZED_KEY_USER_F="$SSH_USER_D/authorized_keys"
 SSH_AUTHORIZED_KEY_ROOT_F="$SSH_ROOT_D/authorized_keys"
 SSH_KNOWN_HOSTS_USER_F="$SSH_USER_D/known_hosts"
 SSH_KNOWN_HOSTS_ROOT_F="$SSH_ROOT_D/known_hosts"
-TIMESYNCD_CONFS_D="/etc/systemd/timesyncd.conf.d"
-TIMESYNCD_CONF_F="$TIMESYNCD_CONFS_D/timesyncd-$CONFIG_USER.conf"
 
 # Create helper file if not found
 if [ ! -f "$HELPER_F" ]; then
@@ -242,27 +239,9 @@ elif [[ "$helper_f_content" == "0" ]]; then
 
     # NTP - custom config
     if checkConfig "CONFIG_INIT_NTP_CUSTOMIZATION"; then
-        if systemctl is-active --quiet systemd-timesyncd; then
-            echo -e "\n\nTimesyncd setup"
-            echo "NTP server: ${CONFIG_NTP_SERVERS:-time.cloudflare.com}"
-            echo "NTP fallback server: ${CONFIG_NTP_FALLBACK_SERVERS:-pool.ntp.org}"
-            mkdir -p "$TIMESYNCD_CONFS_D"
-            echo \
-                "# See timesyncd.conf(5) for details.
-[Time]
-NTP=${CONFIG_NTP_SERVERS:-time.cloudflare.com}
-FallbackNTP=${CONFIG_NTP_FALLBACK_SERVERS:-pool.ntp.org}
-#RootDistanceMaxSec=5
-#PollIntervalMinSec=32
-#PollIntervalMaxSec=2048
-#ConnectionRetrySec=30
-#SaveIntervalSec=60" | tee "$TIMESYNCD_CONF_F" >/dev/null
-            systemctl restart systemd-timesyncd
-            echo "Timesyncd setup done"
-        else
-            echo "systemd-timesyncd is not running, maybe this OS is not using it for timesync, config not applied, please check"
-            paktc
-        fi
+        # shellcheck source=ntp.sh
+        . "$NTP_F"
+        customNtp
     fi
 
     # SSH
