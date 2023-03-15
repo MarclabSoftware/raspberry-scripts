@@ -24,17 +24,17 @@ prepareSSH() {
 
     local ssh_root_d="$HOME_ROOT_D/.ssh"
     local ssh_user_d="$HOME_USER_D/.ssh"
-    local ssh_auth_keys_user_f="$ssh_user_d/authorized_keys"
-    local ssh_auth_keys_root_f="$ssh_root_d/authorized_keys"
-    local ssh_known_hosts_user_f="$ssh_user_d/known_hosts"
-    local ssh_known_hosts_root_f="$ssh_root_d/known_hosts"
+    export SSH_AUTH_KEYS_ROOT_F="$ssh_root_d/authorized_keys"
+    export SSH_AUTH_KEYS_USER_F="$ssh_user_d/authorized_keys"
+    export SSH_KNOWN_HOSTS_ROOT_F="$ssh_root_d/known_hosts"
+    export SSH_KNOWN_HOSTS_USER_F="$ssh_user_d/known_hosts"
 
     mkdir -p "$ssh_root_d"
-    touch "$ssh_auth_keys_root_f" "$ssh_known_hosts_root_f"
+    touch "$SSH_AUTH_KEYS_ROOT_F" "$SSH_KNOWN_HOSTS_ROOT_F"
     sudo -u "$CONFIG_USER" mkdir -p "$ssh_user_d"
-    sudo -u "$CONFIG_USER" touch "$ssh_auth_keys_user_f" "$ssh_known_hosts_user_f"
+    sudo -u "$CONFIG_USER" touch "$SSH_AUTH_KEYS_USER_F" "$SSH_KNOWN_HOSTS_USER_F"
     chmod 700 "$ssh_root_d" "$ssh_user_d"
-    chmod 600 "$ssh_auth_keys_root_f" "$ssh_known_hosts_root_f" "$ssh_auth_keys_user_f" "$ssh_known_hosts_user_f"
+    chmod 600 "$SSH_AUTH_KEYS_ROOT_F" "$SSH_KNOWN_HOSTS_ROOT_F" "$SSH_AUTH_KEYS_USER_F" "$SSH_KNOWN_HOSTS_USER_F"
     echo ".ssh folders and basic files added"
     return 0
 }
