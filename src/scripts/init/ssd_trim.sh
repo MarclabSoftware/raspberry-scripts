@@ -7,10 +7,12 @@ enableTrim() {
 
     if isVarEmpty "$CONFIG_SSD_TRIM_VENDOR"; then
         echo "CONFIG_SSD_TRIM_VENDOR not found, you can find it using 'lsusb' command, cannot proceed"
+        return 1
     fi
 
     if isVarEmpty "$CONFIG_SSD_TRIM_PRODUCT"; then
         echo "CONFIG_SSD_TRIM_PRODUCT not found, you can find it using 'lsusb' command, cannot proceed"
+        return 1
     fi
 
     echo -e "Setting trim conf to $trim_rules_f"
