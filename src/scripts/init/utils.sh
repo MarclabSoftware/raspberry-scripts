@@ -149,19 +149,19 @@ enableService() {
     local serviceName="$1"
     local startService="${2:-false}" # Default value is false
 
-    if systemctl --all --type service | grep -q "$serviceName"; then
-        if [ "$startService" = true ]; then
-            systemctl enable --now "$serviceName"
-            echo -e "\n$serviceName service enabled and started"
-        else
-            systemctl enable "$serviceName"
-            echo -e "\n$serviceName service enabled"
-        fi
-        return 0
-    else
+    if ! systemctl --all --type service | grep -q "$serviceName"; then
         echo "$serviceName service does NOT exist."
         return 1
     fi
+
+    if [ "$startService" = true ]; then
+        systemctl enable --now "$serviceName"
+        echo -e "\n$serviceName service enabled and started"
+    else
+        systemctl enable "$serviceName"
+        echo -e "\n$serviceName service enabled"
+    fi
+    return 0
 }
 
 # Check if a user is in a group
@@ -172,6 +172,5 @@ isUserInGroup() {
     [ $# -lt 2 ] && return 1
     isVarEmpty "$1" && return 1
     isVarEmpty "$2" && return 1
-    groups "$1" | grep -q "\b$2\b" && return 0
-    return 1
+    groups "$1" 2>/dev/null | grep -q "\b$2\b"
 }
