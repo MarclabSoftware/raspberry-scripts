@@ -157,3 +157,28 @@ isNormalUser() {
     fi
     return 0
 }
+
+# Enable a service if exists
+# $1 service name
+# $2 true/false start service
+# EG: enableService docker true
+
+enableService() {
+    [ $# -eq 0 ] && return 1
+    local serviceName="$1"
+    local startService="${2:-false}" # Default value is false
+
+    if systemctl --all --type service | grep -q "$serviceName"; then
+        if [ "$startService" = true ]; then
+            systemctl enable --now "$serviceName"
+            echo -e "\n$serviceName service enabled and started"
+        else
+            systemctl enable "$serviceName"
+            echo -e "\n$serviceName service enabled"
+        fi
+        return 0
+    else
+        echo "$serviceName service does NOT exist."
+        return 1
+    fi
+}

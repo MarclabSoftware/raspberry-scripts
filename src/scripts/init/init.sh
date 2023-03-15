@@ -264,16 +264,12 @@ elif [[ "$helper_f_content" == "0" ]]; then
 
     # Services - bluetooth
     if checkConfig "CONFIG_INIT_SRV_BT_ENABLE"; then
-        echo -e "\n\nEnabling and starting Bluetooth service"
-        systemctl enable --now bluetooth
-        echo -e "\nBluetooth service enabled & started"
+        enableService "bluetooth" true
     fi
 
     # Services - docker
     if checkConfig "CONFIG_INIT_SRV_DOCKER_ENABLE"; then
-        echo -e "\n\nEnabling Docker service"
-        systemctl enable docker.service #  FIXME: Failed to enable unit: File docker.service: Is a directory
-        echo -e "\nDocker service enabled"
+        enableService "docker" false
     fi
 
     # DNS
