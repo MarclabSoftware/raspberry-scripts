@@ -33,6 +33,7 @@ SSD_TRIM_F="$SCRIPT_D/ssd_trim.sh"
 SSD_OPTIMIZATIONS_F="$SCRIPT_D/ssd_optimizations.sh"
 NTP_F="$SCRIPT_D/ntp.sh"
 SSH_PREPARE_F="$SCRIPT_D/ssh_prepare.sh"
+SSH_ADD_KEYS_F="$SCRIPT_D/ssh_add_keys.sh"
 
 # Source utils
 # shellcheck source=utils.sh
@@ -249,14 +250,9 @@ elif [[ "$helper_f_content" == "0" ]]; then
 
     # SSH - add keys
     if checkConfig "CONFIG_INIT_SSH_KEYS_ADD"; then
-        echo -e "\n\nAdding SSH keys"
-        echo -e "Please insert public SSH key for $CONFIG_USER and press Enter\nEG: ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIB8Ht8Z3j6yDWPBHQtOp/R9rjWvfMYo3MSA/K6q8D86r"
-        read -r
-        echo "$REPLY" | sudo -u "$CONFIG_USER" tee -a "$SSH_AUTHORIZED_KEY_USER_F" >/dev/null
-        echo -e "Please insert public SSH key for root user and press Enter\nKeep blank to skip\nEG: ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIB8Ht8Z3j6yDWPBHQtOp/R9rjWvfMYo3MSA/K6q8D86r"
-        read -r
-        echo "$REPLY" | tee -a "$SSH_AUTHORIZED_KEY_ROOT_F" >/dev/null
-        echo "SSH keys added"
+        # shellcheck source=ssh_add_keys.sh
+        . "$SSH_ADD_KEYS_F"
+        addSSHKeys
     fi
 
     # SSH - add hosts
