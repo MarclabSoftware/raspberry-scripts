@@ -34,6 +34,7 @@ SSD_OPTIMIZATIONS_F="$SCRIPT_D/ssd_optimizations.sh"
 NTP_F="$SCRIPT_D/ntp.sh"
 SSH_PREPARE_F="$SCRIPT_D/ssh_prepare.sh"
 SSH_ADD_KEYS_F="$SCRIPT_D/ssh_add_keys.sh"
+SSH_ADD_HOSTS_F="$SCRIPT_D/ssh_add_hosts.sh"
 
 # Source utils
 # shellcheck source=utils.sh
@@ -76,8 +77,6 @@ SSH_ROOT_D="$HOME_ROOT_D/.ssh"
 SSH_USER_D="$HOME_USER_D/.ssh"
 SSH_CONF_D="/etc/ssh"
 SSH_CONF_F="$SSH_CONF_D/sshd_config"
-SSH_AUTHORIZED_KEY_USER_F="$SSH_USER_D/authorized_keys"
-SSH_AUTHORIZED_KEY_ROOT_F="$SSH_ROOT_D/authorized_keys"
 SSH_KNOWN_HOSTS_USER_F="$SSH_USER_D/known_hosts"
 SSH_KNOWN_HOSTS_ROOT_F="$SSH_ROOT_D/known_hosts"
 
@@ -257,13 +256,9 @@ elif [[ "$helper_f_content" == "0" ]]; then
 
     # SSH - add hosts
     if checkConfig "CONFIG_INIT_SSH_HOSTS_ADD"; then
-        echo -e "\n\nAdding SSH useful known hosts"
-        ssh-keyscan "${CONFIG_SSH_HOSTS[@]}" | tee "$SSH_KNOWN_HOSTS_ROOT_F" >/dev/null
-        mkdir -p "$SSH_USER_D"
-        cp "$SSH_KNOWN_HOSTS_ROOT_F" "$SSH_KNOWN_HOSTS_USER_F"
-        chown "$CONFIG_USER:$CONFIG_USER" "$SSH_KNOWN_HOSTS_USER_F"
-        chmod 600 "$SSH_AUTHORIZED_KEY_ROOT_F" "$SSH_AUTHORIZED_KEY_USER_F" "$SSH_KNOWN_HOSTS_ROOT_F" "$SSH_KNOWN_HOSTS_USER_F"
-        echo "SSH useful known hosts added"
+        # shellcheck source=ssh_add_hosts.sh
+        . "$SSH_ADD_HOSTS_F"
+        addSSHHosts
     fi
 
     if checkConfig "CONFIG_INIT_SSH_HARDENING"; then
