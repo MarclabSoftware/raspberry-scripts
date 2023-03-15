@@ -21,7 +21,7 @@ if [ "$sourced" = false ]; then
     SCRIPT_D=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" &>/dev/null && pwd)
     # Source needed files
     . "$SCRIPT_D/utils.sh"
-checkSU || exit 1
+    checkSU || exit 1
     optimizeNetwork
     exit $?
 fi
