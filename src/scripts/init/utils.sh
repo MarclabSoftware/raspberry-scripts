@@ -10,7 +10,7 @@ paktc() {
 # Check if running as root
 checkSU() {
     if [ ! "${EUID:-$(id -u)}" -eq 0 ]; then
-        echo "Please run as root"
+        >&2 echo "Please run as root"
         return 1
     fi
     return 0
@@ -23,7 +23,7 @@ checkSU() {
 # If it exists  and its value is any other value: returns >1 values as error
 checkConfig() {
     if [ $# -eq 0 ]; then
-        echo "${BASH_SOURCE[$i + 1]}:${BASH_LINENO[$i]} - ${FUNCNAME[$i]}: no arguments provided"
+        >&2 echo "${BASH_SOURCE[$i + 1]}:${BASH_LINENO[$i]} - ${FUNCNAME[$i]}: no arguments provided"
         paktc
         return 2
     fi
@@ -37,7 +37,7 @@ checkConfig() {
     elif [ "${!1}" = false ]; then
         return 1
     else
-        echo -e "\n${BASH_SOURCE[$i + 1]}:${BASH_LINENO[$i]} - ${FUNCNAME[$i]}: config error for $1: wrong value, current value: '${!1}'\nPossible values are true,false,ask"
+        >&2 echo -e "\n${BASH_SOURCE[$i + 1]}:${BASH_LINENO[$i]} - ${FUNCNAME[$i]}: config error for $1: wrong value, current value: '${!1}'\nPossible values are true,false,ask"
         paktc
         return 3
     fi
@@ -47,7 +47,7 @@ checkConfig() {
 checkCommand() {
     [ $# -eq 0 ] && return 1
     if ! command -v "$1" &>/dev/null; then
-        echo "$1 command not found"
+        >&2 echo "$1 command not found"
         return 1
     fi
     return 0
@@ -150,7 +150,7 @@ enableService() {
     local startService="${2:-false}" # Default value is false
 
     if ! systemctl --all --type service | grep -q "$serviceName"; then
-        echo "$serviceName service does NOT exist."
+        >&2 echo "$serviceName service does NOT exist."
         return 1
     fi
 
