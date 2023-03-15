@@ -28,7 +28,9 @@ NANO_SYNTAX_HIGHLIGHTING_F="$SCRIPT_D/nano_syntax_highlighting.sh"
 NETWORK_OPTIMIZATIONS_F="$SCRIPT_D/network_optimization.sh"
 NETWORK_ROUTING_F="$SCRIPT_D/network_routing.sh"
 NETWORK_MACVLAN_F="$SCRIPT_D/network_macvlan.sh"
-NETWORK_IPV6_DISABLE="$SCRIPT_D/network_ipv6_disable.sh"
+NETWORK_IPV6_DISABLE_F="$SCRIPT_D/network_ipv6_disable.sh"
+SSD_TRIM_F="$SCRIPT_D/ssd_trim.sh"
+SSD_OPTIMIZATIONS_F="$SCRIPT_D/ssd_optimizations.sh"
 
 # Source utils
 # shellcheck source=utils.sh
@@ -220,31 +222,22 @@ elif [[ "$helper_f_content" == "0" ]]; then
     # Network - IPv6 Disable
     if checkConfig "CONFIG_INIT_NETWORK_IPV6_DISABLE"; then
         # shellcheck source=network_ipv6_disable.sh
-        . "$NETWORK_IPV6_DISABLE"
+        . "$NETWORK_IPV6_DISABLE_F"
         disableIpv6
     fi
 
     # SSD - enable trim
     if checkConfig "CONFIG_INIT_SSD_TRIM_ENABLE"; then
-        echo -e "\n\nAdding fstrim conf to $TRIM_RULES_F"
-        echo "Configured vendor: ${CONFIG_SSD_TRIM_VENDOR:-04e8} | product: ${CONFIG_SSD_TRIM_PRODUCT:-61f5}"
-        echo "Please check with command lsusb if they are correct for your SSD device"
-        paktc
-        echo -e 'ACTION=="add|change", ATTRS{idVendor}=="'"${CONFIG_SSD_TRIM_VENDOR:-04e8}"'", ATTRS{idProduct}=="'"${CONFIG_SSD_TRIM_PRODUCT:-61f5}"'", SUBSYSTEM=="scsi_disk", ATTR{provisioning_mode}="unmap"' | tee "$TRIM_RULES_F" >/dev/null
-        udevadm control --reload-rules
-        udevadm trigger
-        fstrim -av
-        systemctl enable --now fstrim.timer
-        echo "Trim enabled"
+        # shellcheck source=ssd_trim.sh
+        . "$SSD_TRIM_F"
+        enableTrim
     fi
 
     # SSD - FS optimizations
     if checkConfig "CONFIG_INIT_SSD_OPTIMIZATIONS"; then
-        echo -e "\n\nFilesystem optimizations for SSD/MicroSD"
-        cp -a /etc/fstab /etc/fstab.bak
-        echo "/etc/fstab backed up to /etc/fstab.bak"
-        sed -i 's/defaults/defaults,noatime/g' /etc/fstab
-        echo "Filesystem optimizations done"
+        # shellcheck source=ssd_optimizations.sh
+        . "$SSD_OPTIMIZATIONS_F"
+        optimizeFs
     fi
 
     # NTP - custom config
