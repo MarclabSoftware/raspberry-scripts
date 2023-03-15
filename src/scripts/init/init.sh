@@ -8,26 +8,27 @@ NC='\033[0m'       # No color
 # Script related vars
 SCRIPT_D=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" &>/dev/null && pwd)
 SCRIPT_NAME=$(basename "$(readlink -f "${0}")" .sh)
-CONFIG_F="${SCRIPT_D}/${SCRIPT_NAME}.conf"
+CONFIG_F="$SCRIPT_D/$SCRIPT_NAME.conf"
 
 # External scripts
-UTILS_F="${SCRIPT_D}/utils.sh"
-RFKILL_F="${SCRIPT_D}/rfkill.sh"
-JOURNAL_LIMIT_F="${SCRIPT_D}/journal_limit.sh"
-SWAPPINESS_F="${SCRIPT_D}/swappiness.sh"
-PACMAN_COUNTRIES_F="${SCRIPT_D}/pacman_countries.sh"
-PACMAN_COLORS_F="${SCRIPT_D}/pacman_colors.sh"
-PACMAN_INSTALL_PKGS_F="${SCRIPT_D}/pacman_install_pkgs.sh"
-PACMAN_CLEANUP_F="${SCRIPT_D}/pacman_cleanup.sh"
-RPI_EEPROM_BRANCH_F="${SCRIPT_D}/rpi_eeprom_branch.sh"
-RPI_EEPROM_UPDATE_F="${SCRIPT_D}/rpi_eeprom_update.sh"
-RPI_OVERCLOCK_F="${SCRIPT_D}/rpi_overclock.sh"
-USER_GROUPS_F="${SCRIPT_D}/user_groups.sh"
-USER_PASSWRODLESS_SUDO="${SCRIPT_D}/user_passwordless_sudo.sh"
-NANO_SYNTAX_HIGHLIGHTING_F="${SCRIPT_D}/nano_syntax_highlighting.sh"
-NETWORK_OPTIMIZATIONS_F="${SCRIPT_D}/network_optimization.sh"
-NETWORK_ROUTING_F="${SCRIPT_D}/network_routing.sh"
-NETWORK_MACVLAN_F="${SCRIPT_D}/network_macvlan.sh"
+UTILS_F="$SCRIPT_D/utils.sh"
+RFKILL_F="$SCRIPT_D/rfkill.sh"
+JOURNAL_LIMIT_F="$SCRIPT_D/journal_limit.sh"
+SWAPPINESS_F="$SCRIPT_D/swappiness.sh"
+PACMAN_COUNTRIES_F="$SCRIPT_D/pacman_countries.sh"
+PACMAN_COLORS_F="$SCRIPT_D/pacman_colors.sh"
+PACMAN_INSTALL_PKGS_F="$SCRIPT_D/pacman_install_pkgs.sh"
+PACMAN_CLEANUP_F="$SCRIPT_D/pacman_cleanup.sh"
+RPI_EEPROM_BRANCH_F="$SCRIPT_D/rpi_eeprom_branch.sh"
+RPI_EEPROM_UPDATE_F="$SCRIPT_D/rpi_eeprom_update.sh"
+RPI_OVERCLOCK_F="$SCRIPT_D/rpi_overclock.sh"
+USER_GROUPS_F="$SCRIPT_D/user_groups.sh"
+USER_PASSWRODLESS_SUDO="$SCRIPT_D/user_passwordless_sudo.sh"
+NANO_SYNTAX_HIGHLIGHTING_F="$SCRIPT_D/nano_syntax_highlighting.sh"
+NETWORK_OPTIMIZATIONS_F="$SCRIPT_D/network_optimization.sh"
+NETWORK_ROUTING_F="$SCRIPT_D/network_routing.sh"
+NETWORK_MACVLAN_F="$SCRIPT_D/network_macvlan.sh"
+NETWORK_IPV6_DISABLE="$SCRIPT_D/network_ipv6_disable.sh"
 
 # Source utils
 # shellcheck source=utils.sh
@@ -65,9 +66,7 @@ fi
 HOME_USER_D=$(sudo -u "${CONFIG_USER}" sh -c 'echo $HOME')
 HOME_ROOT_D=$(sudo -u root sh -c 'echo $HOME')
 HELPER_F="${HOME_USER_D}/.${SCRIPT_NAME}_progress"
-SYSCTLD_D="/etc/sysctl.d"
-SYSCTLD_NETWORK_CONF_F="${SYSCTLD_D}/21-${CONFIG_USER}_network.conf"
-BOOT_CMDLINE_F="/boot/cmdline.txt"
+
 TRIM_RULES_F="/etc/udev/rules.d/11-trim_samsung.rules"
 RESOLVED_CONFS_D="/etc/systemd/resolved.conf.d"
 RESOLVED_CONF_F="${RESOLVED_CONFS_D}/resolved-${CONFIG_USER}.conf"
@@ -81,8 +80,7 @@ SSH_AUTHORIZED_KEY_USER_F="${SSH_USER_D}/authorized_keys"
 SSH_AUTHORIZED_KEY_ROOT_F="${SSH_ROOT_D}/authorized_keys"
 SSH_KNOWN_HOSTS_USER_F="${SSH_USER_D}/known_hosts"
 SSH_KNOWN_HOSTS_ROOT_F="${SSH_ROOT_D}/known_hosts"
-SYSTEMD_NETWORK_D="/etc/systemd/network/"
-DHCPD_CONF_F="/etc/dhcpcd.conf"
+
 TIMESYNCD_CONFS_D="/etc/systemd/timesyncd.conf.d"
 TIMESYNCD_CONF_F="${TIMESYNCD_CONFS_D}/timesyncd-${CONFIG_USER}.conf"
 
@@ -222,25 +220,9 @@ elif [[ "$helper_f_content" == "0" ]]; then
 
     # Network - IPv6 Disable
     if checkConfig "CONFIG_INIT_NETWORK_IPV6_DISABLE"; then
-        echo -e "\n\nDisabling IPv6"
-        cp -a "${BOOT_CMDLINE_F}" "${BOOT_CMDLINE_F}.bak"
-        echo "Boot cmdline file backed up at ${BOOT_CMDLINE_F}.bak"
-        sed -i 's/$/ ipv6.disable_ipv6=1/g' "${BOOT_CMDLINE_F}"
-        echo \
-            "# Disable IPv6
-net.ipv6.conf.all.disable_ipv6 = 1
-net.ipv6.conf.default.disable_ipv6 = 1" | tee -a "${SYSCTLD_NETWORK_CONF_F}" >/dev/null
-        echo \
-            "LinkLocalAddressing=no
-IPv6AcceptRA=no" | tee -a "${SYSTEMD_NETWORK_D}/${CONFIG_NETWORK_MACVLAN_PARENT}.network" >/dev/null
-        echo \
-            "LinkLocalAddressing=no
-IPv6AcceptRA=no" | tee -a "${SYSTEMD_NETWORK_D}/macvlan-${CONFIG_USER}.network" >/dev/null
-        echo \
-            "ipv4only
-noipv6rs
-noipv6" | tee -a "${DHCPD_CONF_F}" >/dev/null
-        echo "IPv6 disabled"
+        # shellcheck source=network_ipv6_disable.sh
+        . "$NETWORK_IPV6_DISABLE"
+        disableIpv6
     fi
 
     # SSD - enable trim
