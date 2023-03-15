@@ -49,9 +49,7 @@ if [ "$sourced" = false ]; then
     # Source needed files
     . "$SCRIPT_D/init.conf"
     . "$SCRIPT_D/utils.sh"
-    if ! checkSU; then
-        exit 1
-    fi
+    checkSU || exit 1
     enableNanoSyntaxHighlighting
     exit $?
 fi

@@ -41,10 +41,7 @@ SSH_PREPARE_F="$SCRIPT_D/ssh_prepare.sh"
 clear
 
 # Safety checks
-if ! checkSU; then
-    echo "This script must be run as super user"
-    exit 1
-fi
+checkSU || exit 1
 
 # Import config file
 if [ -f "$CONFIG_F" ]; then
