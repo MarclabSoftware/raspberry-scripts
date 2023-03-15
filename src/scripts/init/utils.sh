@@ -28,7 +28,7 @@ checkConfig() {
         return 2
     fi
     if [ -z ${!1+x} ] || [ "${!1}" = "ask" ]; then
-        read -p "Do you want to apply init config for ${1}? Y/N: " -n 1 -r
+        read -p "Do you want to apply init config for $1? Y/N: " -n 1 -r
         echo
         if [[ $REPLY =~ ^[Yy]$ ]]; then
             return 0
@@ -40,7 +40,7 @@ checkConfig() {
     elif [ "${!1}" = false ]; then
         return 1
     else
-        echo -e "\n${BASH_SOURCE[$i + 1]}:${BASH_LINENO[$i]} - ${FUNCNAME[$i]}: config error for ${1}: wrong value, current value: '${!1}'\nPossible values are true,false,ask"
+        echo -e "\n${BASH_SOURCE[$i + 1]}:${BASH_LINENO[$i]} - ${FUNCNAME[$i]}: config error for $1: wrong value, current value: '${!1}'\nPossible values are true,false,ask"
         paktc
         return 3
     fi
@@ -49,7 +49,7 @@ checkConfig() {
 # Check if a command exists
 checkCommand() {
     if ! command -v "$1" &>/dev/null; then
-        echo "${1} command not found"
+        echo "$1 command not found"
         return 1
     fi
     return 0

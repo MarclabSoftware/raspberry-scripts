@@ -6,9 +6,9 @@
 # $3: conf value
 addIfNotFound() {
     if grep -q "$1" "$2"; then
-        sed -i "s/.*${1}.*/${1}=${3}/" "$2"
+        sed -i "s/.*$1.*/$1=$3/" "$2"
     else
-        echo "${1}=${3}" | tee -a "$2" >/dev/null
+        echo "$1=$3" | tee -a "$2" >/dev/null
     fi
 }
 
@@ -29,7 +29,7 @@ goFaster() {
     echo -e "\n\nSetting overclock"
 
     if [ ! -f "$boot_conf_f" ]; then
-        echo "${boot_conf_f} file not found, cannot apply overclock."
+        echo "$boot_conf_f file not found, cannot apply overclock."
         return 1
     fi
 
@@ -49,8 +49,8 @@ goFaster() {
 if [ "$sourced" = false ]; then
     SCRIPT_D=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" &>/dev/null && pwd)
     # Source needed files
-    . "${SCRIPT_D}/init.conf"
-    . "${SCRIPT_D}/utils.sh"
+    . "$SCRIPT_D/init.conf"
+    . "$SCRIPT_D/utils.sh"
     if ! checkSU; then
         exit 1
     fi

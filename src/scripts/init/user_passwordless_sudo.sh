@@ -19,13 +19,13 @@ enablePasswordlessSudo() {
     local sudoers_f="/etc/sudoers.d/99-$CONFIG_USER"
 
     if [ -f "$sudoers_f" ]; then
-        echo "${sudoers_f} file already exists, please check"
+        echo "$sudoers_f file already exists, please check"
         return 1
     fi
 
-    echo "${CONFIG_USER} ALL=(ALL) NOPASSWD: ALL" | tee "$sudoers_f" >/dev/null
+    echo "$CONFIG_USER ALL=(ALL) NOPASSWD: ALL" | tee "$sudoers_f" >/dev/null
     chmod 750 "$sudoers_f"
-    echo "${CONFIG_USER} can run sudo without password from the next boot."
+    echo "$CONFIG_USER can run sudo without password from the next boot."
     return 0
 }
 
@@ -35,8 +35,8 @@ enablePasswordlessSudo() {
 if [ "$sourced" = false ]; then
     SCRIPT_D=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" &>/dev/null && pwd)
     # Source needed files
-    . "${SCRIPT_D}/init.conf"
-    . "${SCRIPT_D}/utils.sh"
+    . "$SCRIPT_D/init.conf"
+    . "$SCRIPT_D/utils.sh"
     if ! checkSU; then
         exit 1
     fi

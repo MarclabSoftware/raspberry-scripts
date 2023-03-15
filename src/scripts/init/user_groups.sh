@@ -13,7 +13,7 @@ addUserToGroups() {
         return 1
     fi
 
-    echo -e "\n\nAdding ${CONFIG_USER} to ${CONFIG_USER_GROUPS_TO_ADD} groups"
+    echo -e "\n\nAdding $CONFIG_USER to $CONFIG_USER_GROUPS_TO_ADD groups"
     usermod -aG "$CONFIG_USER_GROUPS_TO_ADD" "$CONFIG_USER"
     return 0
 }
@@ -24,8 +24,8 @@ addUserToGroups() {
 if [ "$sourced" = false ]; then
     SCRIPT_D=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" &>/dev/null && pwd)
     # Source needed files
-    . "${SCRIPT_D}/init.conf"
-    . "${SCRIPT_D}/utils.sh"
+    . "$SCRIPT_D/init.conf"
+    . "$SCRIPT_D/utils.sh"
     if ! checkSU; then
         exit 1
     fi

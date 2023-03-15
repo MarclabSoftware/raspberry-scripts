@@ -13,7 +13,7 @@ setPacmanCountries() {
         return 1 # Error
     fi
 
-    echo "Using ${coutries} as mirrors"
+    echo "Using $coutries as mirrors"
     pacman-mirrors --country "$coutries"
     echo "Pacman mirrors updated"
 
@@ -26,8 +26,8 @@ setPacmanCountries() {
 if [ "$sourced" = false ]; then
     SCRIPT_D=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" &>/dev/null && pwd)
     # Source needed files
-    . "${SCRIPT_D}/init.conf"
-    . "${SCRIPT_D}/utils.sh"
+    . "$SCRIPT_D/init.conf"
+    . "$SCRIPT_D/utils.sh"
     if ! checkSU; then
         exit 1
     fi

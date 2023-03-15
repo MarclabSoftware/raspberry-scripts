@@ -30,7 +30,7 @@ pacmanCleanup() {
 if [ "$sourced" = false ]; then
     SCRIPT_D=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" &>/dev/null && pwd)
     # Source needed files
-    . "${SCRIPT_D}/utils.sh"
+    . "$SCRIPT_D/utils.sh"
     if ! checkSU; then
         exit 1
     fi

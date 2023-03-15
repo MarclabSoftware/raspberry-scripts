@@ -23,19 +23,19 @@ enableNanoSyntaxHighlighting() {
     fi
 
     local nano_conf_f=".nanorc"
-    local nano_conf_user_f="${HOME_USER_D}/${nano_conf_f}"
-    local nano_conf_root_f="${HOME_ROOT_D}/${nano_conf_f}"
+    local nano_conf_user_f="$HOME_USER_D/$nano_conf_f"
+    local nano_conf_root_f="$HOME_ROOT_D/$nano_conf_f"
 
     if [ ! -f "$nano_conf_root_f" ] || ! grep -q 'include "/usr/share/nano/\*.nanorc' "$nano_conf_root_f"; then
         echo -e 'include "/usr/share/nano/*.nanorc"\nset linenumbers' | tee -a "$nano_conf_root_f" >/dev/null
     else
-        echo "${nano_conf_root_f} already configured"
+        echo "$nano_conf_root_f already configured"
     fi
 
     if [ ! -f "$nano_conf_user_f" ] || ! grep -q 'include "/usr/share/nano/\*.nanorc' "$nano_conf_user_f"; then
         echo -e 'include "/usr/share/nano/*.nanorc"\nset linenumbers' | sudo -u "$CONFIG_USER" tee -a "$nano_conf_user_f" >/dev/null
     else
-        echo "${nano_conf_user_f} already configured"
+        echo "$nano_conf_user_f already configured"
     fi
     echo -e "\nNano Syntax highlighting enabled"
     return 0
@@ -47,7 +47,7 @@ enableNanoSyntaxHighlighting() {
 if [ "$sourced" = false ]; then
     SCRIPT_D=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" &>/dev/null && pwd)
     # Source needed files
-    . "${SCRIPT_D}/utils.sh"
+    . "$SCRIPT_D/utils.sh"
     if ! checkSU; then
         exit 1
     fi
