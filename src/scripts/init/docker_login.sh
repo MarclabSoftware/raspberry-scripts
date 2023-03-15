@@ -3,31 +3,41 @@
 dockerLogin() {
     echo -e "\n\nDocker login"
 
-    sudo -u "$CONFIG_USER" docker login
     if ! checkCommand "docker"; then
-        echo "docker command missing, cannot proceed"
+        echo >&2 "docker command missing, cannot proceed"
         return 1
     fi
 
     echo "Please prepare docker hub user and password"
     paktc
 
-    if checkSU >/dev/null; then
-        if isVarEmpty "$CONFIG_USER"; then
-            echo -e "\nMissing CONFIG_USER, please enter the normal user name and press enter\n"
-            read -r
-            CONFIG_USER="$REPLY"
-        fi
-
-        if ! isNormalUser "$CONFIG_USER"; then
-            echo -e "\nCONFIG_USER problem, it must be set, it must be a normal user, it must exists"
-            return 1
-        fi
-        sudo -u "$CONFIG_USER" docker login
-    else
+    if ! checkSU 2>/dev/null; then
         docker login
+        return 0
     fi
 
+    if isVarEmpty "$CONFIG_USER"; then
+        echo -e "\nMissing CONFIG_USER, please enter the normal user name and press enter\n"
+        read -r
+        CONFIG_USER="$REPLY"
+    fi
+
+    if ! isNormalUser "$CONFIG_USER"; then
+        echo >&2 -e "\nCONFIG_USER problem, it must be set, it must be a normal user, it must exists"
+        return 1
+    fi
+
+    if ! isUserInGroup "$CONFIG_USER" "docker"; then
+        echo >&2 -e "\nCONFIG_USER found, $CONFIG_USER isn't in docker group"
+        read -p "Do you want to add $CONFIG_USER to docker group? Y/N: " -n 1 -r
+        if [[ $REPLY =~ ^[Yy]$ ]]; then
+            usermod -aG "docker" "$CONFIG_USER"
+        else
+            echo >&2 "Cannot proceed"
+            return 1
+        fi
+    fi
+    sudo -u "$CONFIG_USER" docker login
     return 0
 }
 
