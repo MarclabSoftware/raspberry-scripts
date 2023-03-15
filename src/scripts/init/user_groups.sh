@@ -4,12 +4,12 @@ addUserToGroups() {
     echo -e "\n\nAdding user to groups"
 
     if isVarEmpty CONFIG_USER; then
-        echo "CONFIG_USER unset or empty, cannot continue"
+        echo >&2 "CONFIG_USER unset or empty, cannot continue"
         return 1
     fi
 
     if isVarEmpty CONFIG_USER_GROUPS_TO_ADD; then
-        echo "CONFIG_USER_GROUPS_TO_ADD unset or empty, cannot continue"
+        echo >&2 "CONFIG_USER_GROUPS_TO_ADD unset or empty, cannot continue"
         return 1
     fi
 

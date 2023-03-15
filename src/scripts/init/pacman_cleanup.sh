@@ -12,7 +12,7 @@ pacmanCleanup() {
         pacman -Syy
         pacman -S --needed --noconfirm pacman-contrib
         if ! checkCommand "paccache"; then
-            echo "Cannot clean"
+            echo >&2 "Cannot clean"
             return 1
         fi
     fi

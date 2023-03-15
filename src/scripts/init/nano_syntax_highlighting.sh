@@ -10,7 +10,7 @@ enableNanoSyntaxHighlighting() {
     fi
 
     if ! isNormalUser "$CONFIG_USER"; then
-        echo -e "\nCONFIG_USER problem, it must be set, it must be a normal user, it must exists"
+        echo >&2 -e "\nCONFIG_USER problem, it must be set, it must be a normal user, it must exists"
         return 1
     fi
 

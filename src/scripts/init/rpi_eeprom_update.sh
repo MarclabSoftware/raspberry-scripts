@@ -4,7 +4,7 @@ updateEeprom() {
     echo -e "\n\nChecking for Rpi EEPROM updates"
 
     if ! checkCommand "rpi-eeprom-update"; then
-        echo "Cannot update"
+        echo >&2 "Cannot update"
         return 1
     fi
     rpi-eeprom-update -d -a

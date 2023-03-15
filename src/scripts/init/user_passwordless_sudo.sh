@@ -10,7 +10,7 @@ enablePasswordlessSudo() {
     fi
 
     if ! isNormalUser "$CONFIG_USER"; then
-        echo -e "\nCONFIG_USER problem, it must be set, it must be a normal user, it must exists"
+        echo >&2 -e "\nCONFIG_USER problem, it must be set, it must be a normal user, it must exists"
         return 1
     fi
 
@@ -19,7 +19,7 @@ enablePasswordlessSudo() {
     local sudoers_f="/etc/sudoers.d/99-$CONFIG_USER"
 
     if [ -f "$sudoers_f" ]; then
-        echo "$sudoers_f file already exists, please check"
+        echo >&2 "$sudoers_f file already exists, please check"
         return 1
     fi
 

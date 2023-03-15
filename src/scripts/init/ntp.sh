@@ -4,7 +4,7 @@ customNtp() {
     echo -e "\n\nTimesyncd setup"
 
     if ! systemctl is-active --quiet systemd-timesyncd; then
-        echo "systemd-timesyncd is not running, maybe this OS is not using it for timesync, config not applied"
+        echo >&2 "systemd-timesyncd is not running, maybe this OS is not using it for timesync, config not applied"
         return 1
     fi
 

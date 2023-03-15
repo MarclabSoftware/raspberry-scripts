@@ -2,7 +2,7 @@
 
 blockRf() {
     if ! checkCommand "rfkill"; then
-        echo "Cannot continue"
+        echo >&2 "Cannot continue"
         return 1 # Error
     fi
 

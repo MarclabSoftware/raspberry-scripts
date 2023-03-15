@@ -29,7 +29,7 @@ goFaster() {
     echo -e "\n\nSetting overclock"
 
     if [ ! -f "$boot_conf_f" ]; then
-        echo "$boot_conf_f file not found, cannot apply overclock."
+        echo >&2 "$boot_conf_f file not found, cannot apply overclock."
         return 1
     fi
 

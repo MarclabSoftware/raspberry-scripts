@@ -9,12 +9,12 @@ disableIpv6() {
     echo -e "\n\nDisabling IPv6"
 
     if [ ! -f "$boot_cmdline_f" ]; then
-        echo "Missing $boot_cmdline_f file, cannot proceed"
+        echo >&2 "Missing $boot_cmdline_f file, cannot proceed"
         return 1
     fi
 
     if [ ! -f "$dhcpcd_conf_f" ]; then
-        echo "Missing $dhcpcd_conf_f file, cannot proceed"
+        echo >&2 "Missing $dhcpcd_conf_f file, cannot proceed"
         return 1
     fi
 

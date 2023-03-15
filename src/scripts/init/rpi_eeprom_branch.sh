@@ -11,7 +11,7 @@ changeEepromBranch() {
     echo -e "\n\nChanging Rpi EEPROM update channel to $branch"
 
     if [ ! -f "$eeprom_update_f" ]; then
-        echo "Cannot change branch, $eeprom_update_f file is missing"
+        echo >&2 "Cannot change branch, $eeprom_update_f file is missing"
         return 1
     fi
 

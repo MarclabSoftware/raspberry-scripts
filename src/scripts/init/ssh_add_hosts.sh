@@ -4,7 +4,7 @@ addSSHHosts() {
     echo -e "\n\nAdding SSH useful known hosts"
 
     if ! checkCommand "ssh-keyscan"; then
-        echo "Cannot continue"
+        echo >&2 "Cannot continue"
         return 1
     fi
 
