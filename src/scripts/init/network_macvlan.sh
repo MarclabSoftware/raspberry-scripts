@@ -74,6 +74,7 @@ ConfigureWithoutCarrier=yes" | tee "$systemd_network_d/$CONFIG_NETWORK_MACVLAN_N
 if [ "$sourced" = false ]; then
     SCRIPT_D=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" &>/dev/null && pwd)
     # Source needed files
+    . "$SCRIPT_D/init.conf"
     . "$SCRIPT_D/utils.sh"
     if ! checkSU; then
         exit 1
