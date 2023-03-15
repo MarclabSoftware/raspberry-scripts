@@ -1,10 +1,5 @@
 #!/usr/bin/env bash
 
-# Bash colors
-RED='\033[0;31m'   # Red color
-GREEN='\033[0;32m' # Green color
-NC='\033[0m'       # No color
-
 # Script related vars
 SCRIPT_D=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" &>/dev/null && pwd)
 SCRIPT_NAME=$(basename "$(readlink -f "$0")" .sh)
