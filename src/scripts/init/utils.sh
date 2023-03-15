@@ -30,11 +30,8 @@ checkConfig() {
     if [ -z ${!1+x} ] || [ "${!1}" = "ask" ]; then
         read -p "Do you want to apply init config for $1? Y/N: " -n 1 -r
         echo
-        if [[ $REPLY =~ ^[Yy]$ ]]; then
-            return 0
-        else
-            return 1
-        fi
+        [[ $REPLY =~ ^[Yy]$ ]] && return 0
+        return 1
     elif [ "${!1}" = true ]; then
         return 0
     elif [ "${!1}" = false ]; then
@@ -48,6 +45,7 @@ checkConfig() {
 
 # Check if a command exists
 checkCommand() {
+    [ $# -eq 0 ] && return 1
     if ! command -v "$1" &>/dev/null; then
         echo "$1 command not found"
         return 1
@@ -113,20 +111,14 @@ getVarType() {
 # $1: var name
 # EG: isVarArray variable_name
 isVarArray() {
-    if (getVarType "$1" | grep -q "ARRAY"); then
-        return 0
-    fi
-    return 1
+    getVarType "$1" | grep -q "ARRAY"
 }
 
 # Check if a var is int, input arg is var name, bash only
 # $1: var name
 # EG: isVarInt variable_name
 isVarInt() {
-    if (getVarType "$1" | grep -q "INT"); then
-        return 0
-    fi
-    return 1
+    getVarType "$1" | grep -q "INT"
 }
 
 # Check if a var is other, input arg is var name, bash only
@@ -134,27 +126,16 @@ isVarInt() {
 # $1: var name
 # EG: isVarOther variable_name
 isVarOther() {
-    if (getVarType "$1" | grep -q "OTHER"); then
-        return 0
-    fi
-    return 1
+    getVarType "$1" | grep -q "OTHER"
 }
 
 # Check if provided user exists and isn't root
 # $1: username to check
 isNormalUser() {
-    if [ $# -eq 0 ]; then
-        return 1
-    fi
-    if isVarEmpty "$1"; then
-        return 1
-    fi
-    if ! id "$1" &>/dev/null; then
-        return 1
-    fi
-    if [ "$1" = "root" ]; then
-        return 1
-    fi
+    [ $# -eq 0 ] && return 1
+    isVarEmpty "$1" && return 1
+    ! id "$1" &>/dev/null && return 1
+    [ "$1" = "root" ] && return 1
     return 0
 }
 
@@ -181,4 +162,16 @@ enableService() {
         echo "$serviceName service does NOT exist."
         return 1
     fi
+}
+
+# Check if a user is in a group
+# $1: user
+# $2: group
+# EG: isUserInGroup pi nobody
+isUserInGroup() {
+    [ $# -lt 2 ] && return 1
+    isVarEmpty "$1" && return 1
+    isVarEmpty "$2" && return 1
+    groups "$1" | grep -q "\b$2\b" && return 0
+    return 1
 }
