@@ -36,6 +36,7 @@ SSH_PREPARE_F="$SCRIPT_D/ssh_prepare.sh"
 SSH_ADD_KEYS_F="$SCRIPT_D/ssh_add_keys.sh"
 SSH_ADD_HOSTS_F="$SCRIPT_D/ssh_add_hosts.sh"
 SSH_HARDENING_F="$SCRIPT_D/ssh_hardening.sh"
+DNS_F="$SCRIPT_D/dns.sh"
 
 # Source utils
 # shellcheck source=utils.sh
@@ -70,10 +71,6 @@ fi
 HOME_USER_D=$(sudo -u "$CONFIG_USER" sh -c 'echo $HOME')
 HOME_ROOT_D=$(sudo -u root sh -c 'echo $HOME')
 HELPER_F="$HOME_USER_D/.${SCRIPT_NAME}_progress"
-RESOLVED_CONFS_D="/etc/systemd/resolved.conf.d"
-RESOLVED_CONF_F="$RESOLVED_CONFS_D/resolved-$CONFIG_USER.conf"
-RESOLV_CONF_F="/etc/resolv.conf"
-STUB_RESOLV_F="/run/systemd/resolve/stub-resolv.conf"
 
 # Create helper file if not found
 if [ ! -f "$HELPER_F" ]; then
@@ -274,42 +271,13 @@ elif [[ "$helper_f_content" == "0" ]]; then
 
     # DNS
     if checkConfig "CONFIG_INIT_DNS_CUSTOMIZATION"; then
-        echo -e "\n\nAdding DNS systemd-resolved configs"
-        mkdir -p "$RESOLVED_CONFS_D"
-        if [ ! -f "$RESOLVED_CONF_F" ]; then
-            echo \
-                "# See resolved.conf(5) for details.
-[Resolve]
-DNS=$CONFIG_DNS_SRVS
-FallbackDNS=$CONFIG_DNS_FALLBACK_SRVS
-#Domains=
-DNSSEC=$CONFIG_DNS_DNSSEC
-#DNSOverTLS=no
-#MulticastDNS=yes
-#LLMNR=yes
-#Cache=yes
-#CacheFromLocalhost=no
-DNSStubListener=no
-#DNSStubListenerExtra=
-#ReadEtcHosts=yes
-#ResolveUnicastSingleLabel=no" | tee "$RESOLVED_CONF_F" >/dev/null
-            echo "DNS systemd-resolved configs added"
-        else
-            echo "$RESOLVED_CONF_F already exists, please check"
-            paktc
-        fi
-    fi
-    if checkConfig "CONFIG_INIT_DNS_UPLINK_MODE"; then
-        echo -e "\n\nSetting systemd-resolved in uplink mode"
-        mv -f "$RESOLV_CONF_F" "$RESOLV_CONF_F.bak"
-        echo "$RESOLV_CONF_F backed up to $RESOLV_CONF_F.bak"
-        ln -s "$STUB_RESOLV_F" "$RESOLV_CONF_F"
-        echo -e "\nsystemd-resolved in now configured in uplink mode"
-        systemctl restart systemd-resolved
+        # shellcheck source=dns.sh
+        . "$DNS_F"
+        setCustomDNS
     fi
 
     # Pass 1 done
-    echo "1" | sudo -u "$CONFIG_USER" tee "$HELPER_F"
+    echo "1" | tee "$HELPER_F"
     echo -e "\n\nFirst part of the config done"
     echo "Please check sshd config using 'sudo sshd -t' command and fix any problem before rebooting"
     echo "If the command sudo sshd -t has no output the config is ok"
@@ -371,7 +339,7 @@ elif [[ "$helper_f_content" == "1" ]]; then
         fi
     fi
 
-    echo "2" | sudo -u "$CONFIG_USER" tee "$HELPER_F"
+    echo "2" | tee "$HELPER_F"
     echo -e "\n\nSecond part of the config done"
     exit 0
 fi
