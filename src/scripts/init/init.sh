@@ -35,6 +35,7 @@ NTP_F="$SCRIPT_D/ntp.sh"
 SSH_PREPARE_F="$SCRIPT_D/ssh_prepare.sh"
 SSH_ADD_KEYS_F="$SCRIPT_D/ssh_add_keys.sh"
 SSH_ADD_HOSTS_F="$SCRIPT_D/ssh_add_hosts.sh"
+SSH_HARDENING_F="$SCRIPT_D/ssh_hardening.sh"
 
 # Source utils
 # shellcheck source=utils.sh
@@ -73,12 +74,6 @@ RESOLVED_CONFS_D="/etc/systemd/resolved.conf.d"
 RESOLVED_CONF_F="$RESOLVED_CONFS_D/resolved-$CONFIG_USER.conf"
 RESOLV_CONF_F="/etc/resolv.conf"
 STUB_RESOLV_F="/run/systemd/resolve/stub-resolv.conf"
-SSH_ROOT_D="$HOME_ROOT_D/.ssh"
-SSH_USER_D="$HOME_USER_D/.ssh"
-SSH_CONF_D="/etc/ssh"
-SSH_CONF_F="$SSH_CONF_D/sshd_config"
-SSH_KNOWN_HOSTS_USER_F="$SSH_USER_D/known_hosts"
-SSH_KNOWN_HOSTS_ROOT_F="$SSH_ROOT_D/known_hosts"
 
 # Create helper file if not found
 if [ ! -f "$HELPER_F" ]; then
@@ -262,19 +257,9 @@ elif [[ "$helper_f_content" == "0" ]]; then
     fi
 
     if checkConfig "CONFIG_INIT_SSH_HARDENING"; then
-        echo -e "\n\nHardening SSH\nhttps://www.ssh-audit.com/hardening_guides.html for details"
-        rm -rf "$SSH_CONF_D"/ssh_host_*
-        ssh-keygen -t rsa -b 4096 -f "$SSH_CONF_D/ssh_host_rsa_key" -N ""
-        ssh-keygen -t ed25519 -f "$SSH_CONF_D/ssh_host_ed25519_key" -N ""
-        awk '$5 >= 3071' "$SSH_CONF_D/moduli" >"$SSH_CONF_D/moduli.safe"
-        mv "$SSH_CONF_D/moduli.safe" "$SSH_CONF_D/moduli"
-        mv "$SSH_CONF_F" "$SSH_CONF_F.bak"
-        echo "$SSH_CONF_F backed up to $SSH_CONF_F.bak"
-        #TODO
-        echo -e "\n\nPlease paste and save the new sshd_config"
-        paktc
-        nano "$SSH_CONF_F"
-        echo -e "\n\nPlease test the new sshd_config before rebooting\nIf the command sudo sshd -t has no output the config is ok, otherway check it"
+        # shellcheck source=ssh_hardening.sh
+        . "$SSH_HARDENING_F"
+        hardenSSH
     fi
 
     # Services - bluetooth
