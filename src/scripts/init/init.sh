@@ -32,6 +32,7 @@ SSH_ADD_KEYS_F="$SCRIPT_D/ssh_add_keys.sh"
 SSH_ADD_HOSTS_F="$SCRIPT_D/ssh_add_hosts.sh"
 SSH_HARDENING_F="$SCRIPT_D/ssh_hardening.sh"
 DNS_F="$SCRIPT_D/dns.sh"
+DOCKER_LOGIN_F="$SCRIPT_D/docker_login.sh"
 
 # Source utils
 # shellcheck source=utils.sh
@@ -285,10 +286,9 @@ elif [[ "$helper_f_content" == "1" ]]; then
 
     # Docker - login
     if checkConfig "CONFIG_INIT_DOCKER_LOGIN"; then
-        echo -e "\n\nDocker login"
-        echo "Please prepare docker hub user and password"
-        paktc
-        sudo -u "$CONFIG_USER" docker login
+        # shellcheck source=docker_login.sh
+        . "$DOCKER_LOGIN_F"
+        dockerLogin
     fi
 
     # Docker - custom bridge network

@@ -1,8 +1,10 @@
 #!/usr/bin/env bash
 
-optimizeFs() {
-    local fstab_f="/etc/fstab"
+optimizeFs() { 
     echo -e "\n\nFilesystem optimizations for SSD/MicroSD"
+
+    local fstab_f="/etc/fstab"
+    
     cp -a "$fstab_f" "$fstab_f.bak"
     echo "$fstab_f backed up to $fstab_f.bak"
     sed -i 's/defaults/defaults,noatime/g' "$fstab_f"
