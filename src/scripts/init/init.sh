@@ -166,7 +166,7 @@ elif [[ "$helper_f_content" == "0" ]]; then
     if checkInitConfig "CONFIG_INIT_USER_ADD_TO_GROUPS"; then
         # shellcheck source=user_groups.sh
         . "$USER_GROUPS_F"
-        adsUserToGroups
+        addUserToGroups
     fi
 
     # User - sudo without password
