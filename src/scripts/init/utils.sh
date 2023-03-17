@@ -164,6 +164,15 @@ enableService() {
     return 0
 }
 
+# Check if current user is in a group
+# $1: group
+# EG: isMeInGroup nobody
+isMeInGroup() {
+    [ $# -eq 0 ] && return 1
+    isVarEmpty "$1" && return 1
+    groups 2>/dev/null | grep -q "\b$1\b"
+}
+
 # Check if a user is in a group
 # $1: user
 # $2: group
