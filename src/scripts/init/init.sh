@@ -36,6 +36,7 @@ DOCKER_LOGIN_F="$SCRIPT_D/docker_login.sh"
 DOCKER_CUSTOM_BRIDGE_F="$SCRIPT_D/docker_custom_bridge.sh"
 DOCKER_MACVLAN_F="$SCRIPT_D/docker_macvlan.sh"
 BACKUP_RESTORE_F="$SCRIPT_D/backup_restore.sh"
+DOCKER_COMPOSE_START_F"$SCRIPT_D/docker_compose_start.sh"
 
 # Source utils
 # shellcheck source=utils.sh
@@ -311,20 +312,15 @@ elif [[ "$helper_f_content" == "1" ]]; then
 
     # Backup - restore
     if checkInitConfig "CONFIG_INIT_BACKUP_RESTORE"; then
-            # shellcheck source=backup_restore.sh
+        # shellcheck source=backup_restore.sh
         . "$BACKUP_RESTORE_F"
         restoreBackup
     fi
 
     if checkInitConfig "CONFIG_INIT_DOCKER_COMPOSE_START"; then
-        echo -e "\n\nStarting docker compose"
-        if [ -f "$CONFIG_DOCKER_COMPOSE_FILE_PATH" ]; then
-            sudo -u "$CONFIG_USER" docker compose -f "$CONFIG_DOCKER_COMPOSE_FILE_PATH" up -d
-            echo -e "\nServices in $CONFIG_DOCKER_COMPOSE_FILE_PATH compose file should be up and running"
-        else
-            echo "Cannot find $CONFIG_DOCKER_COMPOSE_FILE_PATH compose file, please check"
-            paktc
-        fi
+        # shellcheck source=docker_compose_start.sh
+        . "$DOCKER_COMPOSE_START_F"
+        startDockerCompose
     fi
 
     echo "2" | tee "$HELPER_F" >/dev/null
