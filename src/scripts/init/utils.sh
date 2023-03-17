@@ -163,6 +163,7 @@ isNormalUser() {
 # EG: enableService docker true
 
 enableService() {
+    echo -e "\n\nEnabling service"
     [ $# -eq 0 ] && return 1
     local serviceName="$1"
     local startService="${2:-false}" # Default value is false
@@ -174,10 +175,10 @@ enableService() {
 
     if [ "$startService" = true ]; then
         systemctl enable --now "$serviceName"
-        echo -e "\n$serviceName service enabled and started"
+        echo  "$serviceName service enabled and started"
     else
         systemctl enable "$serviceName"
-        echo -e "\n$serviceName service enabled"
+        echo "$serviceName service enabled"
     fi
     return 0
 }

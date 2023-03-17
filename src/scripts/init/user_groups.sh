@@ -6,7 +6,7 @@ addUserToGroups() {
     checkConfig "CONFIG_USER" || return 1
     checkConfig "CONFIG_USER_GROUPS_TO_ADD" || return 1
 
-    echo -e "\n\nAdding $CONFIG_USER to $CONFIG_USER_GROUPS_TO_ADD groups"
+    echo "Adding $CONFIG_USER to $CONFIG_USER_GROUPS_TO_ADD groups"
     usermod -aG "$CONFIG_USER_GROUPS_TO_ADD" "$CONFIG_USER"
     return 0
 }
