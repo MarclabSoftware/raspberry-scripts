@@ -16,12 +16,13 @@ checkSU() {
     return 0
 }
 
-# Check if a configuration var exists via indirection
+# Check if a bool/ask configuration var exists via indirection
 # The argument to use is the name of the var, not the var itself
 # If it exists and its value is true or false: returns the value (true=0 false=1)
 # If it doesn't exist, or if it's value is 'ask': configures it on the fly as boolean and returns the result
-# If it exists  and its value is any other value: returns >1 values as error
-checkConfig() {
+# If it exists and its value is any other value: returns >1 values as error
+# EG: checkConfig CONFIG_INIT_RFKILL
+checkInitConfig() {
     if [ $# -eq 0 ]; then
         echo >&2 "${BASH_SOURCE[$i + 1]}:${BASH_LINENO[$i]} - ${FUNCNAME[$i]}: no arguments provided"
         paktc
@@ -41,6 +42,23 @@ checkConfig() {
         paktc
         return 3
     fi
+}
+
+# Check if a configuration var exists via indirection
+# The argument to use is the name of the var, not the var itself
+# If it exists and its value is not empty it returns 0, > 0 in any other case
+# EG: checkConfig CONFIG_JOURNAL_SYSTEM_MAX
+checkConfig() {
+    if [ $# -eq 0 ]; then
+        echo >&2 "${BASH_SOURCE[$i + 1]}:${BASH_LINENO[$i]} - ${FUNCNAME[$i]}: no arguments provided"
+        paktc
+        return 2
+    fi
+    if [ -z ${!1+x} ]; then
+        echo >&2 "Missing $1 config, cannot proceed"
+        return 1
+    fi
+    return 0
 }
 
 # Check if a command exists

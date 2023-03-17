@@ -34,6 +34,7 @@ SSH_HARDENING_F="$SCRIPT_D/ssh_hardening.sh"
 DNS_F="$SCRIPT_D/dns.sh"
 DOCKER_LOGIN_F="$SCRIPT_D/docker_login.sh"
 DOCKER_CUSTOM_BRIDGE_F="$SCRIPT_D/docker_custom_bridge.sh"
+DOCKER_MACVLAN_F="$SCRIPT_D/docker_macvlan.sh"
 
 # Source utils
 # shellcheck source=utils.sh
@@ -86,28 +87,28 @@ elif [[ "$helper_f_content" == "0" ]]; then
     echo -e "\nFirst init pass"
 
     # Rfkill - block wireless devices
-    if checkConfig "CONFIG_INIT_RFKILL"; then
+    if checkInitConfig "CONFIG_INIT_RFKILL"; then
         # shellcheck source=rfkill.sh
         . "$RFKILL_F"
         blockRf
     fi
 
     # Journal - limit size
-    if checkConfig "CONFIG_INIT_JOURNAL_LIMIT"; then
+    if checkInitConfig "CONFIG_INIT_JOURNAL_LIMIT"; then
         # shellcheck source=journal_limit.sh
         . "$JOURNAL_LIMIT_F"
         limitJournal
     fi
 
     # RAM - set swappiness
-    if checkConfig "CONFIG_INIT_RAM_SWAPPINESS_CUSTOMIZE"; then
+    if checkInitConfig "CONFIG_INIT_RAM_SWAPPINESS_CUSTOMIZE"; then
         # shellcheck source=swappiness.sh
         . "$SWAPPINESS_F"
         setSwappiness
     fi
 
     # Pacman - set mirrors
-    if checkConfig "CONFIG_INIT_PACMAN_SET_MIRROR_COUNTRIES"; then
+    if checkInitConfig "CONFIG_INIT_PACMAN_SET_MIRROR_COUNTRIES"; then
         # shellcheck source=pacman_countries.sh
         . "$PACMAN_COUNTRIES_F"
         setPacmanCountries
@@ -120,112 +121,112 @@ elif [[ "$helper_f_content" == "0" ]]; then
     echo "Packages updated"
 
     # Pacman - enable colored output
-    if checkConfig "CONFIG_INIT_PACMAN_ENABLE_COLORS"; then
+    if checkInitConfig "CONFIG_INIT_PACMAN_ENABLE_COLORS"; then
         # shellcheck source=pacman_colors.sh
         . "$PACMAN_COLORS_F"
         setPacmanColors
     fi
 
     # Pacman - install packages
-    if checkConfig "CONFIG_INIT_PACMAN_INSTALL_PACKAGES"; then
+    if checkInitConfig "CONFIG_INIT_PACMAN_INSTALL_PACKAGES"; then
         # shellcheck source=pacman_install_pkgs.sh
         . "$PACMAN_INSTALL_PKGS_F"
         installPacmanPackages
     fi
 
     # Pacman - cleanup
-    if checkConfig "CONFIG_INIT_PACMAN_CLEANUP"; then
+    if checkInitConfig "CONFIG_INIT_PACMAN_CLEANUP"; then
         # shellcheck source=pacman_cleanup.sh
         . "$PACMAN_CLEANUP_F"
         pacmanCleanup
     fi
 
     # Rpi - EEPROM update branch
-    if checkConfig "CONFIG_INIT_RPI_EEPROM_BRANCH_CHANGE"; then
+    if checkInitConfig "CONFIG_INIT_RPI_EEPROM_BRANCH_CHANGE"; then
         # shellcheck source=rpi_eeprom_branch.sh
         . "$RPI_EEPROM_BRANCH_F"
         changeEepromBranch
     fi
 
     # Rpi - EEPROM update check
-    if checkConfig "CONFIG_INIT_RPI_EEPROM_UPDATE_CHECK"; then
+    if checkInitConfig "CONFIG_INIT_RPI_EEPROM_UPDATE_CHECK"; then
         # shellcheck source=rpi_eeprom_update.sh
         . "$RPI_EEPROM_UPDATE_F"
         updateEeprom
     fi
 
     # Rpi - Overclock
-    if checkConfig "CONFIG_INIT_RPI_OVERCLOCK_ENABLE"; then
+    if checkInitConfig "CONFIG_INIT_RPI_OVERCLOCK_ENABLE"; then
         # shellcheck source=rpi_overclock.sh
         . "$RPI_OVERCLOCK_F"
         goFaster
     fi
 
     # User - add to groups
-    if checkConfig "CONFIG_INIT_USER_ADD_TO_GROUPS"; then
+    if checkInitConfig "CONFIG_INIT_USER_ADD_TO_GROUPS"; then
         # shellcheck source=user_groups.sh
         . "$USER_GROUPS_F"
         adsUserToGroups
     fi
 
     # User - sudo without password
-    if checkConfig "CONFIG_INIT_USER_SUDO_WITHOUT_PWD"; then
+    if checkInitConfig "CONFIG_INIT_USER_SUDO_WITHOUT_PWD"; then
         # shellcheck source=user_passwordless_sudo.sh
         . "$USER_PASSWRODLESS_SUDO"
         enablePasswordlessSudo
     fi
 
     # Nano - enable syntax highlighting
-    if checkConfig "CONFIG_INIT_NANO_ENABLE_SYNTAX_HIGHLIGHTING"; then
+    if checkInitConfig "CONFIG_INIT_NANO_ENABLE_SYNTAX_HIGHLIGHTING"; then
         # shellcheck source=nano_syntax_highlighting.sh
         . "$NANO_SYNTAX_HIGHLIGHTING_F"
         enableNanoSyntaxHighlighting
     fi
 
     # Network - optimizations
-    if checkConfig "CONFIG_INIT_NETWORK_OPTIMIZATIONS"; then
+    if checkInitConfig "CONFIG_INIT_NETWORK_OPTIMIZATIONS"; then
         # shellcheck source=network_optimization.sh
         . "$NETWORK_OPTIMIZATIONS_F"
         optimizeNetwork
     fi
 
     # Network - enable routing
-    if checkConfig "CONFIG_INIT_NETWORK_ROUTING_ENABLE"; then
+    if checkInitConfig "CONFIG_INIT_NETWORK_ROUTING_ENABLE"; then
         # shellcheck source=network_routing.sh
         . "$NETWORK_ROUTING_F"
         enableRouting
     fi
 
     # Network - MACVLAN host <-> docker bridge
-    if checkConfig "CONFIG_INIT_NETWORK_MACVLAN_SETUP"; then
+    if checkInitConfig "CONFIG_INIT_NETWORK_MACVLAN_SETUP"; then
         # shellcheck source=network_macvlan.sh
         . "$NETWORK_MACVLAN_F"
         enableMacVlan
     fi
 
     # Network - IPv6 Disable
-    if checkConfig "CONFIG_INIT_NETWORK_IPV6_DISABLE"; then
+    if checkInitConfig "CONFIG_INIT_NETWORK_IPV6_DISABLE"; then
         # shellcheck source=network_ipv6_disable.sh
         . "$NETWORK_IPV6_DISABLE_F"
         disableIpv6
     fi
 
     # SSD - enable trim
-    if checkConfig "CONFIG_INIT_SSD_TRIM_ENABLE"; then
+    if checkInitConfig "CONFIG_INIT_SSD_TRIM_ENABLE"; then
         # shellcheck source=ssd_trim.sh
         . "$SSD_TRIM_F"
         enableTrim
     fi
 
     # SSD - FS optimizations
-    if checkConfig "CONFIG_INIT_SSD_OPTIMIZATIONS"; then
+    if checkInitConfig "CONFIG_INIT_SSD_OPTIMIZATIONS"; then
         # shellcheck source=ssd_optimizations.sh
         . "$SSD_OPTIMIZATIONS_F"
         optimizeFs
     fi
 
     # NTP - custom config
-    if checkConfig "CONFIG_INIT_NTP_CUSTOMIZATION"; then
+    if checkInitConfig "CONFIG_INIT_NTP_CUSTOMIZATION"; then
         # shellcheck source=ntp.sh
         . "$NTP_F"
         customNtp
@@ -237,37 +238,37 @@ elif [[ "$helper_f_content" == "0" ]]; then
     prepareSSH
 
     # SSH - add keys
-    if checkConfig "CONFIG_INIT_SSH_KEYS_ADD"; then
+    if checkInitConfig "CONFIG_INIT_SSH_KEYS_ADD"; then
         # shellcheck source=ssh_add_keys.sh
         . "$SSH_ADD_KEYS_F"
         addSSHKeys
     fi
 
     # SSH - add hosts
-    if checkConfig "CONFIG_INIT_SSH_HOSTS_ADD"; then
+    if checkInitConfig "CONFIG_INIT_SSH_HOSTS_ADD"; then
         # shellcheck source=ssh_add_hosts.sh
         . "$SSH_ADD_HOSTS_F"
         addSSHHosts
     fi
 
-    if checkConfig "CONFIG_INIT_SSH_HARDENING"; then
+    if checkInitConfig "CONFIG_INIT_SSH_HARDENING"; then
         # shellcheck source=ssh_hardening.sh
         . "$SSH_HARDENING_F"
         hardenSSH
     fi
 
     # Services - bluetooth
-    if checkConfig "CONFIG_INIT_SRV_BT_ENABLE"; then
+    if checkInitConfig "CONFIG_INIT_SRV_BT_ENABLE"; then
         enableService "bluetooth" true
     fi
 
     # Services - docker
-    if checkConfig "CONFIG_INIT_SRV_DOCKER_ENABLE"; then
+    if checkInitConfig "CONFIG_INIT_SRV_DOCKER_ENABLE"; then
         enableService "docker" false
     fi
 
     # DNS
-    if checkConfig "CONFIG_INIT_DNS_CUSTOMIZATION"; then
+    if checkInitConfig "CONFIG_INIT_DNS_CUSTOMIZATION"; then
         # shellcheck source=dns.sh
         . "$DNS_F"
         setCustomDNS
@@ -286,35 +287,28 @@ elif [[ "$helper_f_content" == "1" ]]; then
     echo "Second init pass"
 
     # Docker - login
-    if checkConfig "CONFIG_INIT_DOCKER_LOGIN"; then
+    if checkInitConfig "CONFIG_INIT_DOCKER_LOGIN"; then
         # shellcheck source=docker_login.sh
         . "$DOCKER_LOGIN_F"
         dockerLogin
     fi
 
     # Docker - custom bridge network
-    if checkConfig "CONFIG_INIT_DOCKER_NETWORK_ADD_CUSTOM_BRIDGE"; then
+    if checkInitConfig "CONFIG_INIT_DOCKER_NETWORK_ADD_CUSTOM_BRIDGE"; then
         # shellcheck source=docker_custom_bridge.sh
         . "$DOCKER_CUSTOM_BRIDGE_F"
         createCustomDockerBridgeNetwork
     fi
 
     # Docker - add MACVLAN network
-    if checkConfig "CONFIG_INIT_DOCKER_NETWORK_ADD_MACVLAN"; then
-        echo -e "\n\nCreating Docker custom MACVLAN network macvlan_$CONFIG_USER"
-        sudo -u "$CONFIG_USER" docker network create "bridge_$CONFIG_USER"
-        sudo -u "$CONFIG_USER" docker network create -d macvlan \
-            --subnet="$CONFIG_NETWORK_MACVLAN_SUBNET" \
-            --ip-range="$CONFIG_NETWORK_MACVLAN_RANGE" \
-            --gateway="$CONFIG_NETWORK_MACVLAN_GATEWAY" \
-            -o parent="$CONFIG_NETWORK_MACVLAN_PARENT" \
-            --aux-address="macvlan_bridge=$CONFIG_NETWORK_MACVLAN_STATIC_IP" \
-            "macvlan_$CONFIG_USER"
-        echo "Docker custom MACVLAN network created"
+    if checkInitConfig "CONFIG_INIT_DOCKER_NETWORK_ADD_MACVLAN"; then
+        # shellcheck source=docker_macvlan.sh
+        . "$DOCKER_MACVLAN_F"
+        createDockerMacvlanNetwork
     fi
 
     # Backup - restore
-    if checkConfig "CONFIG_INIT_BACKUP_RESTORE"; then
+    if checkInitConfig "CONFIG_INIT_BACKUP_RESTORE"; then
         echo -e "\n\nRestoring backup"
         if [ ! -f "$CONFIG_BACKUP_FILE_PATH" ]; then
             echo -e "\nCannot find $CONFIG_BACKUP_FILE_PATH, please check"
@@ -324,7 +318,7 @@ elif [[ "$helper_f_content" == "1" ]]; then
         fi
     fi
 
-    if checkConfig "CONFIG_INIT_DOCKER_COMPOSE_START"; then
+    if checkInitConfig "CONFIG_INIT_DOCKER_COMPOSE_START"; then
         echo -e "\n\nStarting docker compose"
         if [ -f "$CONFIG_DOCKER_COMPOSE_FILE_PATH" ]; then
             sudo -u "$CONFIG_USER" docker compose -f "$CONFIG_DOCKER_COMPOSE_FILE_PATH" up -d
