@@ -10,10 +10,7 @@ createCustomDockerBridgeNetwork() {
         return 1
     fi
 
-    if isVarEmpty "$CONFIG_DOCKER_NETWORK_CUSTOM_BRIDGE_NAME"; then
-        echo >&2 "Missing CONFIG_DOCKER_NETWORK_CUSTOM_BRIDGE_NAME, cannot proceed"
-        return 1
-    fi
+    checkConfig "CONFIG_DOCKER_NETWORK_CUSTOM_BRIDGE_NAME" || return 1
 
     if ! checkSU 2>/dev/null && ! isMeInGroup "$docker_group"; then
         echo >&2 -e "\nCurrent user isn't in $docker_group group, cannot proceed"
@@ -22,7 +19,7 @@ createCustomDockerBridgeNetwork() {
     fi
 
     docker network create "$CONFIG_DOCKER_NETWORK_CUSTOM_BRIDGE_NAME"
-    echo "Docker custom bridge network created"
+    echo "Docker custom bridge network '$CONFIG_DOCKER_NETWORK_CUSTOM_BRIDGE_NAME' created"
     return 0
 }
 

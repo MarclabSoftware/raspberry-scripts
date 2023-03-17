@@ -5,15 +5,8 @@ enableTrim() {
     echo -e "\n\nConfiguring trim for SSD"
     local trim_rules_f="/etc/udev/rules.d/21-ssd_trim.rules"
 
-    if isVarEmpty "$CONFIG_SSD_TRIM_VENDOR"; then
-        echo >&2 "CONFIG_SSD_TRIM_VENDOR not found, you can find it using 'lsusb' command, cannot proceed"
-        return 1
-    fi
-
-    if isVarEmpty "$CONFIG_SSD_TRIM_PRODUCT"; then
-        echo >&2 "CONFIG_SSD_TRIM_PRODUCT not found, you can find it using 'lsusb' command, cannot proceed"
-        return 1
-    fi
+    checkConfig "CONFIG_SSD_TRIM_VENDOR" || return 1
+    checkConfig "CONFIG_SSD_TRIM_PRODUCT" || return 1
 
     echo -e "Setting trim conf to $trim_rules_f"
     echo "Configured vendor: $CONFIG_SSD_TRIM_VENDOR | product: $CONFIG_SSD_TRIM_PRODUCT"

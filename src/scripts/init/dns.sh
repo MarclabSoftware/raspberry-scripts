@@ -3,25 +3,10 @@
 setCustomDNS() {
     echo -e "\n\nAdding custom DNS systemd-resolved configs"
 
-    if isVarEmpty "$CONFIG_DNS_SRVS"; then
-        echo "Missing CONFIG_DNS_SRVS, cannot proceed"
-        return 1
-    fi
-
-    if isVarEmpty "$CONFIG_DNS_FALLBACK_SRVS"; then
-        echo "Missing CONFIG_DNS_FALLBACK_SRVS, cannot proceed"
-        return 1
-    fi
-
-    if isVarEmpty "$CONFIG_DNS_DNSSEC"; then
-        echo "Missing CONFIG_DNS_DNSSEC, cannot proceed"
-        return 1
-    fi
-
-    if isVarEmpty "$CONFIG_DNS_STUB_LISTENER"; then
-        echo "Missing CONFIG_DNS_STUB_LISTENER, cannot proceed"
-        return 1
-    fi
+    checkConfig "CONFIG_DNS_SRVS" || return 1
+    checkConfig "CONFIG_DNS_FALLBACK_SRVS" || return 1
+    checkConfig "CONFIG_DNS_DNSSEC" || return 1
+    checkConfig "CONFIG_DNS_STUB_LISTENER" || return 1
 
     local resolved_confs_d="/etc/systemd/resolved.conf.d"
     local resolved_conf_f="$resolved_confs_d/custom_dns.conf"

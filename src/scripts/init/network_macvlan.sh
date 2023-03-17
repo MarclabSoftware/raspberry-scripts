@@ -3,25 +3,10 @@
 enableMacVlan() {
     echo -e "\n\nMACVLAN host <-> docker bridge setup"
 
-    if isVarEmpty "$CONFIG_NETWORK_MACVLAN_NAME"; then
-        echo >&2 "Missing CONFIG_NETWORK_MACVLAN_NAME, cannot proceed"
-        return 1
-    fi
-
-    if isVarEmpty "$CONFIG_NETWORK_MACVLAN_PARENT"; then
-        echo >&2 "Missing CONFIG_NETWORK_MACVLAN_PARENT, cannot proceed"
-        return 1
-    fi
-
-    if isVarEmpty "$CONFIG_NETWORK_MACVLAN_STATIC_IP"; then
-        echo >&2 "Missing CONFIG_NETWORK_MACVLAN_STATIC_IP, cannot proceed"
-        return 1
-    fi
-
-    if isVarEmpty "$CONFIG_NETWORK_MACVLAN_RANGE"; then
-        echo >&2 "Missing CONFIG_NETWORK_MACVLAN_RANGE, cannot proceed"
-        return 1
-    fi
+    checkConfig "CONFIG_NETWORK_MACVLAN_NAME" || return 1
+    checkConfig "CONFIG_NETWORK_MACVLAN_PARENT" || return 1
+    checkConfig "CONFIG_NETWORK_MACVLAN_STATIC_IP" || return 1
+    checkConfig "CONFIG_NETWORK_MACVLAN_RANGE" || return 1
 
     local systemd_network_d="/etc/systemd/network"
     local dhcpcd_conf_f="/etc/dhcpcd.conf"

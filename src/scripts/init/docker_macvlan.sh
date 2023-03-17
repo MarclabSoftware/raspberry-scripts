@@ -10,12 +10,12 @@ createDockerMacvlanNetwork() {
         return 1
     fi
 
-    checkConfig "CONFIG_NETWORK_MACVLAN_SUBNET" && return 1
-    checkConfig "CONFIG_NETWORK_MACVLAN_RANGE" && return 1
-    checkConfig "CONFIG_NETWORK_MACVLAN_GATEWAY" && return 1
-    checkConfig "CONFIG_NETWORK_MACVLAN_PARENT" && return 1
-    checkConfig "CONFIG_NETWORK_MACVLAN_STATIC_IP" && return 1
-    checkConfig "CONFIG_DOCKER_NETWORK_MACVLAN_NAME" && return 1
+    checkConfig "CONFIG_NETWORK_MACVLAN_SUBNET" || return 1
+    checkConfig "CONFIG_NETWORK_MACVLAN_RANGE" || return 1
+    checkConfig "CONFIG_NETWORK_MACVLAN_GATEWAY" || return 1
+    checkConfig "CONFIG_NETWORK_MACVLAN_PARENT" || return 1
+    checkConfig "CONFIG_NETWORK_MACVLAN_STATIC_IP" || return 1
+    checkConfig "CONFIG_DOCKER_NETWORK_MACVLAN_NAME" || return 1
 
     if ! checkSU 2>/dev/null && ! isMeInGroup "$docker_group"; then
         echo >&2 -e "\nCurrent user isn't in $docker_group group, cannot proceed"

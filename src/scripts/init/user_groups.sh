@@ -3,15 +3,8 @@
 addUserToGroups() {
     echo -e "\n\nAdding user to groups"
 
-    if isVarEmpty CONFIG_USER; then
-        echo >&2 "CONFIG_USER unset or empty, cannot continue"
-        return 1
-    fi
-
-    if isVarEmpty CONFIG_USER_GROUPS_TO_ADD; then
-        echo >&2 "CONFIG_USER_GROUPS_TO_ADD unset or empty, cannot continue"
-        return 1
-    fi
+    checkConfig "CONFIG_USER" || return 1
+    checkConfig "CONFIG_USER_GROUPS_TO_ADD" || return 1
 
     echo -e "\n\nAdding $CONFIG_USER to $CONFIG_USER_GROUPS_TO_ADD groups"
     usermod -aG "$CONFIG_USER_GROUPS_TO_ADD" "$CONFIG_USER"
