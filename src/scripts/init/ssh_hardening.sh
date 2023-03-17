@@ -29,7 +29,7 @@ hardenSSH() {
         paktc
         mv "$sshd_conf_f" "$sshd_conf_f.bak"
         echo "$sshd_conf_f backed up to $sshd_conf_f.bak"
-        tee "$sshd_conf_f" <"$SCRIPT_D/sshd_config"
+        tee "$sshd_conf_f" >/dev/null <"$SCRIPT_D/sshd_config"
     fi
 
     echo -e "\n\nPlease test the new sshd config before rebooting\nIf the command sudo sshd -t has no output the config is ok, otherways check it"

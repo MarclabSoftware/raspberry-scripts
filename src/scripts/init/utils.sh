@@ -167,7 +167,7 @@ enableService() {
     local serviceName="$1"
     local startService="${2:-false}" # Default value is false
 
-    if ! systemctl --all --type service | grep -q "$serviceName"; then
+    if ! systemctl list-unit-files | grep -q "$serviceName"; then
         echo >&2 "$serviceName service does NOT exist."
         return 1
     fi

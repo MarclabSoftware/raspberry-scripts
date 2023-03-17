@@ -259,12 +259,13 @@ elif [[ "$helper_f_content" == "0" ]]; then
 
     # Services - bluetooth
     if checkInitConfig "CONFIG_INIT_SRV_BT_ENABLE"; then
-        enableService "bluetooth" true
+        enableService "bluetooth.service" true
     fi
 
     # Services - docker
     if checkInitConfig "CONFIG_INIT_SRV_DOCKER_ENABLE"; then
-        enableService "docker" false
+        enableService "docker.service" false
+        enableService "containerd.service" false
     fi
 
     # DNS
@@ -275,7 +276,7 @@ elif [[ "$helper_f_content" == "0" ]]; then
     fi
 
     # Pass 1 done
-    echo "1" | tee "$HELPER_F"
+    echo "1" | tee "$HELPER_F" >/dev/null
     echo -e "\n\nFirst part of the config done"
     echo "Please check sshd config using 'sudo sshd -t' command and fix any problem before rebooting"
     echo "If the command sudo sshd -t has no output the config is ok"
@@ -329,7 +330,7 @@ elif [[ "$helper_f_content" == "1" ]]; then
         fi
     fi
 
-    echo "2" | tee "$HELPER_F"
+    echo "2" | tee "$HELPER_F" >/dev/null
     echo -e "\n\nSecond part of the config done"
     exit 0
 fi
