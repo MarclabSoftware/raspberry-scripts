@@ -7,8 +7,8 @@ rm -rf "$SCRIPT_DIR/tmp-scripts"
 mkdir -p "$SCRIPT_DIR/tmp-scripts"
 
 echo "Split file into modules"
-csplit -z -f "$SCRIPT_DIR/tmp-scripts/part-" -b %02d.module "${0}" /#\ {{.*}}/ '{*}' >/dev/null
-rm "$SCRIPT_DIR/tmp-scripts/part-00.module"
+csplit -z -f "$SCRIPT_DIR/tmp-scripts/part-" -b %02d.module "$0" /#\ {{.*}}/ '{*}' >/dev/null
+rm "$SCRIPT_DIR/tmp-scripts/part-00.module" # This excludes the bootstrap file
 chmod -R a+x "$SCRIPT_DIR"/tmp-scripts/*.module
 
 for module in "$SCRIPT_DIR"/tmp-scripts/*.module; do
@@ -21,6 +21,6 @@ for module in "$SCRIPT_DIR"/tmp-scripts/*.module; do
     mv "$module" "$SCRIPT_DIR/tmp-scripts/$moduleDir/$moduleName"
 done
 
-sudo "$SCRIPT_DIR/tmp-scripts/scripts/init_script.sh"
+sudo "$SCRIPT_DIR/tmp-scripts/scripts/init/init.sh"
 
 exit 0 # Important for later merge/split, do not remove
