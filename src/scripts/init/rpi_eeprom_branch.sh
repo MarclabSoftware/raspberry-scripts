@@ -15,7 +15,7 @@ changeEepromBranch() {
         return 1
     fi
 
-    sed -i 's/FIRMWARE_RELEASE_STATUS=".*"/FIRMWARE_RELEASE_STATUS="'"$branch"'"/g' "$eeprom_update_f"
+    sed -i "s/FIRMWARE_RELEASE_STATUS=.*/FIRMWARE_RELEASE_STATUS=$branch/g" "$eeprom_update_f"
     echo "Rpi EEPROM update channel changed"
     return 0
 }
