@@ -35,6 +35,7 @@ DNS_F="$SCRIPT_D/dns.sh"
 DOCKER_LOGIN_F="$SCRIPT_D/docker_login.sh"
 DOCKER_CUSTOM_BRIDGE_F="$SCRIPT_D/docker_custom_bridge.sh"
 DOCKER_MACVLAN_F="$SCRIPT_D/docker_macvlan.sh"
+BACKUP_RESTORE_F="$SCRIPT_D/backup_restore.sh"
 
 # Source utils
 # shellcheck source=utils.sh
@@ -310,13 +311,9 @@ elif [[ "$helper_f_content" == "1" ]]; then
 
     # Backup - restore
     if checkInitConfig "CONFIG_INIT_BACKUP_RESTORE"; then
-        echo -e "\n\nRestoring backup"
-        if [ ! -f "$CONFIG_BACKUP_FILE_PATH" ]; then
-            echo -e "\nCannot find $CONFIG_BACKUP_FILE_PATH, please check"
-            paktc
-        else
-            tar --same-owner -xf "$CONFIG_BACKUP_FILE_PATH" -C /
-        fi
+            # shellcheck source=backup_restore.sh
+        . "$BACKUP_RESTORE_F"
+        restoreBackup
     fi
 
     if checkInitConfig "CONFIG_INIT_DOCKER_COMPOSE_START"; then
