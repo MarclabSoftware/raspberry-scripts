@@ -3,6 +3,8 @@
 dockerLogin() {
     echo -e "\n\nDocker login"
 
+    local docker_group="docker"
+
     if ! checkCommand "docker"; then
         echo >&2 "docker command missing, cannot proceed"
         return 1
@@ -12,6 +14,10 @@ dockerLogin() {
     paktc
 
     if ! checkSU 2>/dev/null; then
+        if ! isMeInGroup "$docker_group"; then
+            echo >&2 -e "\nCurrent user isn't in $docker_group group, cannot proceed"
+            return 1
+        fi
         docker login
         return 0
     fi
@@ -27,11 +33,11 @@ dockerLogin() {
         return 1
     fi
 
-    if ! isUserInGroup "$CONFIG_USER" "docker"; then
-        echo >&2 -e "\nCONFIG_USER found, $CONFIG_USER isn't in docker group"
-        read -p "Do you want to add $CONFIG_USER to docker group? Y/N: " -n 1 -r
+    if ! isUserInGroup "$CONFIG_USER" "$docker_group"; then
+        echo >&2 -e "\nCONFIG_USER found, $CONFIG_USER isn't in $docker_group group"
+        read -p "Do you want to add $CONFIG_USER to $docker_group group? Y/N: " -n 1 -r
         if [[ $REPLY =~ ^[Yy]$ ]]; then
-            usermod -aG "docker" "$CONFIG_USER"
+            usermod -aG "$docker_group" "$CONFIG_USER"
         else
             echo >&2 "Cannot proceed"
             return 1
