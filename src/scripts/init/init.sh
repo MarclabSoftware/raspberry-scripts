@@ -33,6 +33,7 @@ SSH_ADD_HOSTS_F="$SCRIPT_D/ssh_add_hosts.sh"
 SSH_HARDENING_F="$SCRIPT_D/ssh_hardening.sh"
 DNS_F="$SCRIPT_D/dns.sh"
 DOCKER_LOGIN_F="$SCRIPT_D/docker_login.sh"
+DOCKER_CUSTOM_BRIDGE_F="$SCRIPT_D/docker_custom_bridge.sh"
 
 # Source utils
 # shellcheck source=utils.sh
@@ -293,9 +294,9 @@ elif [[ "$helper_f_content" == "1" ]]; then
 
     # Docker - custom bridge network
     if checkConfig "CONFIG_INIT_DOCKER_NETWORK_ADD_CUSTOM_BRIDGE"; then
-        echo -e "\n\nCreating Docker custom bridge network bridge_$CONFIG_USER"
-        sudo -u "$CONFIG_USER" docker network create "bridge_$CONFIG_USER"
-        echo "Docker custom bridge network created"
+        # shellcheck source=docker_custom_bridge.sh
+        . "$DOCKER_CUSTOM_BRIDGE_F"
+        createCustomDockerBridgeNetwork
     fi
 
     # Docker - add MACVLAN network
