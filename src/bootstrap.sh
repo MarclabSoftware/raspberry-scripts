@@ -7,7 +7,7 @@ rm -rf "$SCRIPT_DIR/tmp-scripts"
 mkdir -p "$SCRIPT_DIR/tmp-scripts"
 
 echo "Split file into modules"
-csplit -z -f "$SCRIPT_DIR/tmp-scripts/part-" -b %02d.module "$0" /#\ {{.*}}/ '{*}' >/dev/null
+csplit -z -f "$SCRIPT_DIR/tmp-scripts/part-" -b %02d.module "$0" '/#\ {{.*}}/' '{*}' >/dev/null
 rm "$SCRIPT_DIR/tmp-scripts/part-00.module" # This excludes the bootstrap file
 chmod -R a+x "$SCRIPT_DIR"/tmp-scripts/*.module
 
