@@ -36,7 +36,7 @@ DOCKER_LOGIN_F="$SCRIPT_D/docker_login.sh"
 DOCKER_CUSTOM_BRIDGE_F="$SCRIPT_D/docker_custom_bridge.sh"
 DOCKER_MACVLAN_F="$SCRIPT_D/docker_macvlan.sh"
 BACKUP_RESTORE_F="$SCRIPT_D/backup_restore.sh"
-DOCKER_COMPOSE_START_F"$SCRIPT_D/docker_compose_start.sh"
+DOCKER_COMPOSE_START_F="$SCRIPT_D/docker_compose_start.sh"
 
 # Source utils
 # shellcheck source=utils.sh
