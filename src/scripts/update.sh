@@ -10,7 +10,7 @@ if [ ! "${EUID:-$(id -u)}" -eq 0 ]; then
 fi
 
 echo -e "\n\nUpdating pacman mirrors"
-pacman-mirrors --country "${PACMAN_MIRRORS_COUNTRIES}"
+pacman-mirrors --country "$PACMAN_MIRRORS_COUNTRIES"
 
 echo -e "\n\nUpdating packages"
 pacman -Syyuu --noconfirm
