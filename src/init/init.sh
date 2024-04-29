@@ -1,45 +1,53 @@
 #!/usr/bin/env bash
 
+# @scriptman namespace marclab
+# @scriptman name rpinit
+# @scriptman asset assets/**
+# @scriptman asset scripts/**
+
+# region sec:run
+# @scriptman sec:start run
+
 # Script related vars
 SCRIPT_D=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" &>/dev/null && pwd)
 SCRIPT_NAME=$(basename "$(readlink -f "$0")" .sh)
-CONFIG_F="$SCRIPT_D/$SCRIPT_NAME.conf"
+CONFIG_F="$SCRIPT_D/scripts/$SCRIPT_NAME.conf"
 
 # External scripts
-UTILS_F="$SCRIPT_D/utils.sh"
-RFKILL_F="$SCRIPT_D/rfkill.sh"
-JOURNAL_LIMIT_F="$SCRIPT_D/journal_limit.sh"
-SWAPPINESS_F="$SCRIPT_D/swappiness.sh"
-PACMAN_COUNTRIES_F="$SCRIPT_D/pacman_countries.sh"
-PACMAN_COLORS_F="$SCRIPT_D/pacman_colors.sh"
-PACMAN_INSTALL_PKGS_F="$SCRIPT_D/pacman_install_pkgs.sh"
-PACMAN_CLEANUP_F="$SCRIPT_D/pacman_cleanup.sh"
-RPI_EEPROM_BRANCH_F="$SCRIPT_D/rpi_eeprom_branch.sh"
-RPI_EEPROM_UPDATE_F="$SCRIPT_D/rpi_eeprom_update.sh"
-RPI_OVERCLOCK_F="$SCRIPT_D/rpi_overclock.sh"
-USER_GROUPS_F="$SCRIPT_D/user_groups.sh"
-USER_PASSWRODLESS_SUDO="$SCRIPT_D/user_passwordless_sudo.sh"
-NANO_SYNTAX_HIGHLIGHTING_F="$SCRIPT_D/nano_syntax_highlighting.sh"
-NETWORK_OPTIMIZATIONS_F="$SCRIPT_D/network_optimization.sh"
-NETWORK_ROUTING_F="$SCRIPT_D/network_routing.sh"
-NETWORK_MACVLAN_F="$SCRIPT_D/network_macvlan.sh"
-NETWORK_IPV6_DISABLE_F="$SCRIPT_D/network_ipv6_disable.sh"
-SSD_TRIM_F="$SCRIPT_D/ssd_trim.sh"
-SSD_OPTIMIZATIONS_F="$SCRIPT_D/ssd_optimizations.sh"
-NTP_F="$SCRIPT_D/ntp.sh"
-SSH_PREPARE_F="$SCRIPT_D/ssh_prepare.sh"
-SSH_ADD_KEYS_F="$SCRIPT_D/ssh_add_keys.sh"
-SSH_ADD_HOSTS_F="$SCRIPT_D/ssh_add_hosts.sh"
-SSH_HARDENING_F="$SCRIPT_D/ssh_hardening.sh"
-DNS_F="$SCRIPT_D/dns.sh"
-DOCKER_LOGIN_F="$SCRIPT_D/docker_login.sh"
-DOCKER_CUSTOM_BRIDGE_F="$SCRIPT_D/docker_custom_bridge.sh"
-DOCKER_MACVLAN_F="$SCRIPT_D/docker_macvlan.sh"
-BACKUP_RESTORE_F="$SCRIPT_D/backup_restore.sh"
-DOCKER_COMPOSE_START_F="$SCRIPT_D/docker_compose_start.sh"
+UTILS_F="$SCRIPT_D/scripts/utils.sh"
+RFKILL_F="$SCRIPT_D/scripts/rfkill.sh"
+JOURNAL_LIMIT_F="$SCRIPT_D/scripts/journal_limit.sh"
+SWAPPINESS_F="$SCRIPT_D/scripts/swappiness.sh"
+PACMAN_COUNTRIES_F="$SCRIPT_D/scripts/pacman_countries.sh"
+PACMAN_COLORS_F="$SCRIPT_D/scripts/pacman_colors.sh"
+PACMAN_INSTALL_PKGS_F="$SCRIPT_D/scripts/pacman_install_pkgs.sh"
+PACMAN_CLEANUP_F="$SCRIPT_D/scripts/pacman_cleanup.sh"
+RPI_EEPROM_BRANCH_F="$SCRIPT_D/scripts/rpi_eeprom_branch.sh"
+RPI_EEPROM_UPDATE_F="$SCRIPT_D/scripts/rpi_eeprom_update.sh"
+RPI_OVERCLOCK_F="$SCRIPT_D/scripts/rpi_overclock.sh"
+USER_GROUPS_F="$SCRIPT_D/scripts/user_groups.sh"
+USER_PASSWRODLESS_SUDO="$SCRIPT_D/scripts/user_passwordless_sudo.sh"
+NANO_SYNTAX_HIGHLIGHTING_F="$SCRIPT_D/scripts/nano_syntax_highlighting.sh"
+NETWORK_OPTIMIZATIONS_F="$SCRIPT_D/scripts/network_optimization.sh"
+NETWORK_ROUTING_F="$SCRIPT_D/scripts/network_routing.sh"
+NETWORK_MACVLAN_F="$SCRIPT_D/scripts/network_macvlan.sh"
+NETWORK_IPV6_DISABLE_F="$SCRIPT_D/scripts/network_ipv6_disable.sh"
+SSD_TRIM_F="$SCRIPT_D/scripts/ssd_trim.sh"
+SSD_OPTIMIZATIONS_F="$SCRIPT_D/scripts/ssd_optimizations.sh"
+NTP_F="$SCRIPT_D/scripts/ntp.sh"
+SSH_PREPARE_F="$SCRIPT_D/scripts/ssh_prepare.sh"
+SSH_ADD_KEYS_F="$SCRIPT_D/scripts/ssh_add_keys.sh"
+SSH_ADD_HOSTS_F="$SCRIPT_D/scripts/ssh_add_hosts.sh"
+SSH_HARDENING_F="$SCRIPT_D/scripts/ssh_hardening.sh"
+DNS_F="$SCRIPT_D/scripts/dns.sh"
+DOCKER_LOGIN_F="$SCRIPT_D/scripts/docker_login.sh"
+DOCKER_CUSTOM_BRIDGE_F="$SCRIPT_D/scripts/docker_custom_bridge.sh"
+DOCKER_MACVLAN_F="$SCRIPT_D/scripts/docker_macvlan.sh"
+BACKUP_RESTORE_F="$SCRIPT_D/scripts/backup_restore.sh"
+DOCKER_COMPOSE_START_F="$SCRIPT_D/scripts/docker_compose_start.sh"
 
 # Source utils
-# shellcheck source=utils.sh
+# shellcheck source=scripts/utils.sh
 . "$UTILS_F"
 
 clear
@@ -50,8 +58,10 @@ checkSU || exit 1
 # Import config file
 if [ -f "$CONFIG_F" ]; then
     echo "Config file found... importing it"
-    # shellcheck source=init.conf
+    # shellcheck source=scripts/init.conf
     . "$CONFIG_F"
+elif [ "$CONFIG_IS_SET" == "true"]; then
+    echo "Env var for config set... using them"
 else
     echo "Config file not found... proceeding to manual config"
 fi
@@ -90,28 +100,28 @@ elif [[ "$helper_f_content" == "0" ]]; then
 
     # Rfkill - block wireless devices
     if checkInitConfig "CONFIG_INIT_RFKILL"; then
-        # shellcheck source=rfkill.sh
+        # shellcheck source=scripts/rfkill.sh
         . "$RFKILL_F"
         blockRf
     fi
 
     # Journal - limit size
     if checkInitConfig "CONFIG_INIT_JOURNAL_LIMIT"; then
-        # shellcheck source=journal_limit.sh
+        # shellcheck source=scripts/journal_limit.sh
         . "$JOURNAL_LIMIT_F"
         limitJournal
     fi
 
     # RAM - set swappiness
     if checkInitConfig "CONFIG_INIT_RAM_SWAPPINESS_CUSTOMIZE"; then
-        # shellcheck source=swappiness.sh
+        # shellcheck source=scripts/swappiness.sh
         . "$SWAPPINESS_F"
         setSwappiness
     fi
 
     # Pacman - set mirrors
     if checkInitConfig "CONFIG_INIT_PACMAN_SET_MIRROR_COUNTRIES"; then
-        # shellcheck source=pacman_countries.sh
+        # shellcheck source=scripts/pacman_countries.sh
         . "$PACMAN_COUNTRIES_F"
         setPacmanCountries
     fi
@@ -124,137 +134,137 @@ elif [[ "$helper_f_content" == "0" ]]; then
 
     # Pacman - enable colored output
     if checkInitConfig "CONFIG_INIT_PACMAN_ENABLE_COLORS"; then
-        # shellcheck source=pacman_colors.sh
+        # shellcheck source=scripts/pacman_colors.sh
         . "$PACMAN_COLORS_F"
         setPacmanColors
     fi
 
     # Pacman - install packages
     if checkInitConfig "CONFIG_INIT_PACMAN_INSTALL_PACKAGES"; then
-        # shellcheck source=pacman_install_pkgs.sh
+        # shellcheck source=scripts/pacman_install_pkgs.sh
         . "$PACMAN_INSTALL_PKGS_F"
         installPacmanPackages
     fi
 
     # Pacman - cleanup
     if checkInitConfig "CONFIG_INIT_PACMAN_CLEANUP"; then
-        # shellcheck source=pacman_cleanup.sh
+        # shellcheck source=scripts/pacman_cleanup.sh
         . "$PACMAN_CLEANUP_F"
         pacmanCleanup
     fi
 
     # Rpi - EEPROM update branch
     if checkInitConfig "CONFIG_INIT_RPI_EEPROM_BRANCH_CHANGE"; then
-        # shellcheck source=rpi_eeprom_branch.sh
+        # shellcheck source=scripts/rpi_eeprom_branch.sh
         . "$RPI_EEPROM_BRANCH_F"
         changeEepromBranch
     fi
 
     # Rpi - EEPROM update check
     if checkInitConfig "CONFIG_INIT_RPI_EEPROM_UPDATE_CHECK"; then
-        # shellcheck source=rpi_eeprom_update.sh
+        # shellcheck source=scripts/rpi_eeprom_update.sh
         . "$RPI_EEPROM_UPDATE_F"
         updateEeprom
     fi
 
     # Rpi - Overclock
     if checkInitConfig "CONFIG_INIT_RPI_OVERCLOCK_ENABLE"; then
-        # shellcheck source=rpi_overclock.sh
+        # shellcheck source=scripts/rpi_overclock.sh
         . "$RPI_OVERCLOCK_F"
         goFaster
     fi
 
     # User - add to groups
     if checkInitConfig "CONFIG_INIT_USER_ADD_TO_GROUPS"; then
-        # shellcheck source=user_groups.sh
+        # shellcheck source=scripts/user_groups.sh
         . "$USER_GROUPS_F"
         addUserToGroups
     fi
 
     # User - sudo without password
     if checkInitConfig "CONFIG_INIT_USER_SUDO_WITHOUT_PWD"; then
-        # shellcheck source=user_passwordless_sudo.sh
+        # shellcheck source=scripts/user_passwordless_sudo.sh
         . "$USER_PASSWRODLESS_SUDO"
         enablePasswordlessSudo
     fi
 
     # Nano - enable syntax highlighting
     if checkInitConfig "CONFIG_INIT_NANO_ENABLE_SYNTAX_HIGHLIGHTING"; then
-        # shellcheck source=nano_syntax_highlighting.sh
+        # shellcheck source=scripts/nano_syntax_highlighting.sh
         . "$NANO_SYNTAX_HIGHLIGHTING_F"
         enableNanoSyntaxHighlighting
     fi
 
     # Network - optimizations
     if checkInitConfig "CONFIG_INIT_NETWORK_OPTIMIZATIONS"; then
-        # shellcheck source=network_optimization.sh
+        # shellcheck source=scripts/network_optimization.sh
         . "$NETWORK_OPTIMIZATIONS_F"
         optimizeNetwork
     fi
 
     # Network - enable routing
     if checkInitConfig "CONFIG_INIT_NETWORK_ROUTING_ENABLE"; then
-        # shellcheck source=network_routing.sh
+        # shellcheck source=scripts/network_routing.sh
         . "$NETWORK_ROUTING_F"
         enableRouting
     fi
 
     # Network - MACVLAN host <-> docker bridge
     if checkInitConfig "CONFIG_INIT_NETWORK_MACVLAN_SETUP"; then
-        # shellcheck source=network_macvlan.sh
+        # shellcheck source=scripts/network_macvlan.sh
         . "$NETWORK_MACVLAN_F"
         enableMacVlan
     fi
 
     # Network - IPv6 Disable
     if checkInitConfig "CONFIG_INIT_NETWORK_IPV6_DISABLE"; then
-        # shellcheck source=network_ipv6_disable.sh
+        # shellcheck source=scripts/network_ipv6_disable.sh
         . "$NETWORK_IPV6_DISABLE_F"
         disableIpv6
     fi
 
     # SSD - enable trim
     if checkInitConfig "CONFIG_INIT_SSD_TRIM_ENABLE"; then
-        # shellcheck source=ssd_trim.sh
+        # shellcheck source=scripts/ssd_trim.sh
         . "$SSD_TRIM_F"
         enableTrim
     fi
 
     # SSD - FS optimizations
     if checkInitConfig "CONFIG_INIT_SSD_OPTIMIZATIONS"; then
-        # shellcheck source=ssd_optimizations.sh
+        # shellcheck source=scripts/ssd_optimizations.sh
         . "$SSD_OPTIMIZATIONS_F"
         optimizeFs
     fi
 
     # NTP - custom config
     if checkInitConfig "CONFIG_INIT_NTP_CUSTOMIZATION"; then
-        # shellcheck source=ntp.sh
+        # shellcheck source=scripts/ntp.sh
         . "$NTP_F"
         customNtp
     fi
 
     # SSH - prepare
-    # shellcheck source=ssh_prepare.sh
+    # shellcheck source=scripts/ssh_prepare.sh
     . "$SSH_PREPARE_F"
     prepareSSH
 
     # SSH - add keys
     if checkInitConfig "CONFIG_INIT_SSH_KEYS_ADD"; then
-        # shellcheck source=ssh_add_keys.sh
+        # shellcheck source=scripts/ssh_add_keys.sh
         . "$SSH_ADD_KEYS_F"
         addSSHKeys
     fi
 
     # SSH - add hosts
     if checkInitConfig "CONFIG_INIT_SSH_HOSTS_ADD"; then
-        # shellcheck source=ssh_add_hosts.sh
+        # shellcheck source=scripts/ssh_add_hosts.sh
         . "$SSH_ADD_HOSTS_F"
         addSSHHosts
     fi
 
     if checkInitConfig "CONFIG_INIT_SSH_HARDENING"; then
-        # shellcheck source=ssh_hardening.sh
+        # shellcheck source=scripts/ssh_hardening.sh
         . "$SSH_HARDENING_F"
         hardenSSH
     fi
@@ -272,7 +282,7 @@ elif [[ "$helper_f_content" == "0" ]]; then
 
     # DNS
     if checkInitConfig "CONFIG_INIT_DNS_CUSTOMIZATION"; then
-        # shellcheck source=dns.sh
+        # shellcheck source=scripts/dns.sh
         . "$DNS_F"
         setCustomDNS
     fi
@@ -291,34 +301,34 @@ elif [[ "$helper_f_content" == "1" ]]; then
 
     # Docker - login
     if checkInitConfig "CONFIG_INIT_DOCKER_LOGIN"; then
-        # shellcheck source=docker_login.sh
+        # shellcheck source=scripts/docker_login.sh
         . "$DOCKER_LOGIN_F"
         dockerLogin
     fi
 
     # Docker - custom bridge network
     if checkInitConfig "CONFIG_INIT_DOCKER_NETWORK_ADD_CUSTOM_BRIDGE"; then
-        # shellcheck source=docker_custom_bridge.sh
+        # shellcheck source=scripts/docker_custom_bridge.sh
         . "$DOCKER_CUSTOM_BRIDGE_F"
         createCustomDockerBridgeNetwork
     fi
 
     # Docker - add MACVLAN network
     if checkInitConfig "CONFIG_INIT_DOCKER_NETWORK_ADD_MACVLAN"; then
-        # shellcheck source=docker_macvlan.sh
+        # shellcheck source=scripts/docker_macvlan.sh
         . "$DOCKER_MACVLAN_F"
         createDockerMacvlanNetwork
     fi
 
     # Backup - restore
     if checkInitConfig "CONFIG_INIT_BACKUP_RESTORE"; then
-        # shellcheck source=backup_restore.sh
+        # shellcheck source=scripts/backup_restore.sh
         . "$BACKUP_RESTORE_F"
         restoreBackup
     fi
 
     if checkInitConfig "CONFIG_INIT_DOCKER_COMPOSE_START"; then
-        # shellcheck source=docker_compose_start.sh
+        # shellcheck source=scripts/docker_compose_start.sh
         . "$DOCKER_COMPOSE_START_F"
         startDockerCompose
     fi
@@ -329,3 +339,6 @@ elif [[ "$helper_f_content" == "1" ]]; then
 fi
 
 exit 0
+
+# endregion sec:run
+# @scriptman sec:end run
