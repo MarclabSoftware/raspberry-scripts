@@ -2,16 +2,24 @@
 
 # @scriptman namespace marclab
 # @scriptman name rpinit
+# @scriptman asset tpl.getargs.env
 # @scriptman asset assets/**
 # @scriptman asset scripts/**
+# @scriptman getargs-tpl tpl.getargs.env
+
+# region sec:getargs
+# @scriptman sec:start getargs
+echo "Note: configure env file before running this script with Scriptman"
+# @scriptman sec:end getargs
+# endregion sec:getargs
 
 # region sec:run
 # @scriptman sec:start run
-
 # Script related vars
 SCRIPT_D=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" &>/dev/null && pwd)
 SCRIPT_NAME=$(basename "$(readlink -f "$0")" .sh)
-CONFIG_F="$SCRIPT_D/scripts/$SCRIPT_NAME.conf"
+CONFIG_F="$SCRIPT_D/$SCRIPT_NAME.conf"
+PROGRESS_FILE_NAME=".${SCRIPT_NAME}_progress"
 
 # External scripts
 UTILS_F="$SCRIPT_D/scripts/utils.sh"
@@ -60,8 +68,9 @@ if [ -f "$CONFIG_F" ]; then
     echo "Config file found... importing it"
     # shellcheck source=scripts/init.conf
     . "$CONFIG_F"
-elif [ "$CONFIG_IS_SET" == "true"]; then
-    echo "Env var for config set... using them"
+elif [ "$CONFIG_IS_SET" == "true" ]; then
+    echo "Env var for config set (probably via Scriptman)... using them"
+    PROGRESS_FILE_NAME=".rpi_init_progress"
 else
     echo "Config file not found... proceeding to manual config"
 fi
@@ -80,7 +89,7 @@ fi
 # Constants
 HOME_USER_D=$(sudo -u "$CONFIG_USER" sh -c 'echo $HOME')
 HOME_ROOT_D=$(sudo -u root sh -c 'echo $HOME')
-HELPER_F="$HOME_USER_D/.${SCRIPT_NAME}_progress"
+HELPER_F="$HOME_USER_D/${PROGRESS_FILE_NAME}"
 
 # Create helper file if not found
 if [ ! -f "$HELPER_F" ]; then
