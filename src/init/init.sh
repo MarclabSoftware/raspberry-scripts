@@ -16,7 +16,13 @@ echo "Note: configure env file before running this script with Scriptman"
 # region sec:run
 # @scriptman sec:start run
 # Script related vars
-SCRIPT_D=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" &>/dev/null && pwd)
+SOURCE=${BASH_SOURCE[0]}
+while [ -L "$SOURCE" ]; do # resolve $SOURCE until the file is no longer a symlink
+  DIR=$( cd -P "$( dirname "$SOURCE" )" >/dev/null 2>&1 && pwd )
+  SOURCE=$(readlink "$SOURCE")
+  [[ $SOURCE != /* ]] && SOURCE=$DIR/$SOURCE # if $SOURCE was a relative symlink, we need to resolve it relative to the path where the symlink file was located
+done
+SCRIPT_D=$( cd -P "$( dirname "$SOURCE" )" >/dev/null 2>&1 && pwd )
 SCRIPT_NAME=$(basename "$(readlink -f "$0")" .sh)
 CONFIG_F="$SCRIPT_D/$SCRIPT_NAME.conf"
 PROGRESS_FILE_NAME=".${SCRIPT_NAME}_progress"
