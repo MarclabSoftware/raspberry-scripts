@@ -1,64 +1,85 @@
 #!/bin/bash
 
-# Remove outdated letsencrypt CSRs, keys and certificates
+set -euo pipefail # Modalità strict per maggiore sicurezza
 
-LEBasePath="$HOME/docker/npm/letsencrypt"
-keepOldVersions=1
-keepOldCsrDays=180
-keepOldKeysDays=180
+# Configurazione
+readonly LE_BASE_PATH="${HOME}/docker/npm/letsencrypt"
+readonly KEEP_OLD_VERSIONS=1
+readonly KEEP_OLD_CSR_DAYS=180
+readonly KEEP_OLD_KEYS_DAYS=180
 
-if [ ! -d "$LEBasePath" ]; then
-    echo "Error: configured Let's Encrypt base path $LEBasePath does not exist" >&2
+# Logging function
+log() {
+    local level="$1"
+    local message="$2"
+    echo "[$(date '+%Y-%m-%d %H:%M:%S')] [$level] $message"
+}
+
+# Verifica directory base
+if [[ ! -d "${LE_BASE_PATH}" ]]; then
+    log "ERROR" "Let's Encrypt base path ${LE_BASE_PATH} does not exist"
     exit 1
 fi
 
-# cleanup csr directory
-if [ -d "$LEBasePath/csr" ]; then
-    find "$LEBasePath/csr" -name '*_csr-certbot.pem' -type f -mtime +$keepOldCsrDays -exec rm -f {} ';'
-else
-    echo "$LEBasePath/csr does not exist, skipping" >&2
-fi
+cleanup_directory() {
+    local directory="$1"
+    local pattern="$2"
+    local days="$3"
 
-# cleanup keys directory
-if [ -d "$LEBasePath/keys" ]; then
-    find "$LEBasePath/keys" -name '*_key-certbot.pem' -type f -mtime +$keepOldKeysDays -exec rm -f {} ';'
-else
-    echo "$LEBasePath/keys does not exist, skipping" >&2
-fi
+    if [[ ! -d "${directory}" ]]; then
+        log "WARNING" "Directory ${directory} does not exist, skipping"
+        return 0
+    fi
 
-function getFileId() {
-    local result
-    getFileIdResult=-1 # Error
-    result=$(expr "$1" : '.*[privkey|cert|chain|fullchain]\(.[0-9]*\).pem$')
-    if [ -n "$result" ] && [ "$result" -eq "$result" ] 2>/dev/null; then
-        getFileIdResult="$result"
+    find "${directory}" -name "${pattern}" -type f -mtime "+${days}" -print0 |
+        while IFS= read -r -d '' file; do
+            log "INFO" "Deleting old file: ${file}"
+            rm -f "${file}"
+        done
+}
+
+get_file_id() {
+    local filename="$1"
+    if [[ ${filename} =~ [privkey|cert|chain|fullchain]([0-9]+)\.pem$ ]]; then
+        echo "${BASH_REMATCH[1]}"
+    else
+        echo "-1"
     fi
 }
 
-# cleanup archive directory
-if [ -d "$LEBasePath/live" ]; then
-    for symlink in "$LEBasePath"/live/*/privkey.pem; do
-        target=$(readlink -f "$symlink")
-        if [ $? -ne 0 ]; then
-            continue
-        fi
-        getFileId "$target"
-        if [ "$getFileIdResult" -eq -1 ]; then
-            continue
-        fi
-        cmpId=$((getFileIdResult - keepOldVersions))
-        for archivefile in "$(dirname "$target")"/*.pem; do
-            getFileId "$archivefile"
-            if [ "$getFileIdResult" -eq -1 ]; then
-                continue
-            fi
-            if [ "$getFileIdResult" -lt "$cmpId" ]; then
-                echo "Deleting $archivefile"
-                rm -f "$archivefile"
-            fi
-        done
-    done
-fi
+main() {
+    # Cleanup CSR and keys directories
+    log "INFO" "Starting cleanup of CSR and keys directories"
+    cleanup_directory "${LE_BASE_PATH}/csr" '*_csr-certbot.pem' "${KEEP_OLD_CSR_DAYS}"
+    cleanup_directory "${LE_BASE_PATH}/keys" '*_key-certbot.pem' "${KEEP_OLD_KEYS_DAYS}"
 
-echo "Done"
+    # Cleanup live certificates
+    if [[ -d "${LE_BASE_PATH}/live" ]]; then
+        log "INFO" "Processing live certificates"
+        while IFS= read -r -d '' symlink; do
+            target=$(readlink -f "${symlink}")
+            file_id=$(get_file_id "${target}")
+
+            if [[ ${file_id} -ge 0 ]]; then
+                cmp_id=$((file_id - KEEP_OLD_VERSIONS))
+                target_dir=$(dirname "${target}")
+
+                find "${target_dir}" -name "*.pem" -type f -print0 |
+                    while IFS= read -r -d '' archive_file; do
+                        current_id=$(get_file_id "${archive_file}")
+                        if [[ ${current_id} -lt ${cmp_id} ]]; then
+                            log "INFO" "Deleting old certificate: ${archive_file}"
+                            rm -f "${archive_file}"
+                        fi
+                    done
+            fi
+        done < <(find "${LE_BASE_PATH}/live" -name "privkey.pem" -type l -print0)
+    fi
+
+    log "INFO" "Cleanup completed successfully"
+}
+
+# Esegui lo script
+main
+
 exit 0
