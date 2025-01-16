@@ -12,8 +12,8 @@ hardenSSH() {
     awk '$5 >= 3071' "$ssh_conf_d/moduli" >"$ssh_conf_d/moduli.safe"
     mv "$ssh_conf_d/moduli.safe" "$ssh_conf_d/moduli"
 
-    if [ ! -f "$SCRIPT_D/sshd_config" ]; then
-        echo "Missing $SCRIPT_D/sshd_config file"
+    if [ ! -f "$SCRIPT_D/assets/sshd_config" ]; then
+        echo "Missing $SCRIPT_D/assets/sshd_config file"
         read -p "Do you want to paste it manually in editor? Y/N: " -n 1 -r
         if [[ $REPLY =~ ^[Yy]$ ]]; then
             mv "$sshd_conf_f" "$sshd_conf_f.bak"
@@ -25,7 +25,7 @@ hardenSSH() {
             echo "$sshd_conf_f file unchanged"
         fi
     else
-        echo "$SCRIPT_D/sshd_config file found, using it to overwrite $sshd_conf_f"
+        echo "$SCRIPT_D/assets/sshd_config file found, using it to overwrite $sshd_conf_f"
         paktc
         mv "$sshd_conf_f" "$sshd_conf_f.bak"
         echo "$sshd_conf_f backed up to $sshd_conf_f.bak"

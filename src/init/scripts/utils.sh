@@ -3,7 +3,8 @@
 # Press any key to continue
 paktc() {
     echo
-    read -n 1 -s -r -p "Press any key to continue"
+    echo "Press any key to continue"
+    read -n 1 -s -r
     echo
 }
 
