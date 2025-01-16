@@ -1,5 +1,27 @@
 #!/bin/bash
 
+# =============================================================================
+# Certificate Monitor and Converter Script
+# =============================================================================
+#
+# Monitors Let's Encrypt certificate directory and automatically converts 
+# certificates from PEM to PFX format for Technitium DNS Server.
+#
+# Features:
+# - Directory monitoring with inotify
+# - PEM to PFX conversion
+# - Systemd service support
+# - Error handling and logging
+#
+# Requirements:
+# - openssl, inotifywait
+# - Non-root user
+#
+# Author: LaboDJ
+# Version: 1.0
+# Last Updated: 2025/01/16
+# =============================================================================
+
 # Exit on error, undefined variables, and pipe failures
 set -euo pipefail
 

@@ -1,5 +1,40 @@
 #!/bin/bash
 
+###############################################################################
+# IP-Based Firewall Configuration Script
+# 
+# This script configures a sophisticated firewall using iptables and ipset,
+# allowing traffic only from specified countries while implementing various
+# security measures including:
+# - Country-based IP filtering
+# - SSH brute force protection
+# - Docker container network security
+# - Optional IPv6 disable feature
+# - Automatic blocklist integration
+# - Logging of dropped packets
+#
+# Features:
+# - Parallel processing for improved performance
+# - Exponential backoff retry mechanism
+# - Comprehensive error handling
+# - Automatic cleanup on exit
+# - Support for both allow and block lists
+# - Docker container network protection
+#
+# Usage:
+#   sudo ./script.sh [-c countries] [-b] [-6] [-s sshPort] [-h]
+#
+# Requirements:
+#   - Root privileges
+#   - curl, ipset, iptables, iprange, ping
+#   - Active internet connection
+#
+# Author: LaboDJ
+# Version: 1.0
+# Last Updated: 2025/01/16
+###############################################################################
+
+
 # Enable strict mode for better error handling and debugging
 # -e: exit on error
 # -u: treat unset variables as errors

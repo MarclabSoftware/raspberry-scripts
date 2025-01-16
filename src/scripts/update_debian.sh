@@ -1,5 +1,51 @@
 #!/usr/bin/env bash
 
+###############################################################################
+# Raspberry Pi System Maintenance Script
+#
+# This comprehensive maintenance script performs system updates, backups, and
+# cleanup operations for a Raspberry Pi running Docker containers. It includes
+# safety checks, logging, and thorough cleanup procedures.
+#
+# Features:
+# - System configuration backup
+# - Full system update (apt packages)
+# - Raspberry Pi EEPROM updates
+# - Docker container updates and maintenance
+# - System and Docker cleanup operations
+# - Disk usage monitoring
+# - Comprehensive logging
+#
+# Components Managed:
+# - System packages and configurations
+# - Docker containers (Node-RED and others)
+# - System logs and temporary files
+# - EEPROM firmware
+# - Configuration files backup
+#
+# Backup Locations:
+# - Primary backup directory: /home/labo/backups
+# - Docker base directory: /home/labo/docker
+#
+# Requirements:
+# - Root privileges
+# - Docker
+# - apt package manager
+# - rpi-eeprom-update utility
+# - tar utility
+#
+# Usage:
+#   sudo ./script.sh
+#
+# Note: A system reboot is recommended after script completion
+# to apply all updates properly.
+#
+# Author: LaboDJ
+# Version: 1.0
+# Last Updated: 2025/01/16
+###############################################################################
+
+
 set -euo pipefail
 IFS=$'\n\t'
 

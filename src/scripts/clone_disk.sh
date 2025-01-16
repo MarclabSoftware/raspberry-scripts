@@ -1,12 +1,32 @@
 #!/bin/bash
 
-# Script to clone Raspberry Pi system SSD to backup SSD
-# Both drives are 500GB SSDs connected via USB
-# Creates an exact clone maintaining original PARTUUIDs
+# =============================================================================
+# Raspberry Pi System Backup Script
+# =============================================================================
+#
+# Creates an exact bootable clone of a Raspberry Pi system from one SSD to another.
+# Maintains all partition UUIDs and filesystem attributes for direct replacement.
+#
+# Requirements:
+# - Two SSDs connected via USB (/dev/sda source, /dev/sdb destination)
+# - Root privileges
+# - Required tools: rsync, mkfs.vfat, mkfs.ext4, fsck tools
+#
+# Warning: This script will completely erase the destination drive!
+#
+# Author: LaboDJ
+# Version: 1.0
+# Last Updated: 2025/01/16
+# =============================================================================
 
+# Enable exit on error
 set -e
 
-# Function to check if a device exists
+# Helper Functions
+# -----------------------------------------------------------------------------
+
+# Verifies if a block device exists
+# Args: $1 - device path
 check_device() {
     if [ ! -b "$1" ]; then
         echo "Error: Device $1 not found!"
@@ -14,7 +34,8 @@ check_device() {
     fi
 }
 
-# Function to verify mount status
+# Verifies if a path is properly mounted
+# Args: $1 - mount point to check
 verify_mount() {
     if ! mountpoint -q "$1"; then
         echo "Error: Failed to mount $1"
@@ -22,7 +43,8 @@ verify_mount() {
     fi
 }
 
-# Function to safely unmount
+# Safely unmounts a filesystem with fallback to lazy unmount
+# Args: $1 - mount point to unmount
 safe_unmount() {
     local mount_point="$1"
     if mountpoint -q "$mount_point"; then
@@ -33,37 +55,50 @@ safe_unmount() {
     fi
 }
 
-# Function to verify if a command exists
+# Verifies if a command is available in the system
+# Args: $1 - command to check
 command_exists() {
     command -v "$1" >/dev/null 2>&1
 }
 
-# Function to check available space
+# Checks if destination has enough space for the backup
+# Args: $1 - source path, $2 - destination path
 check_space() {
     local src=$1
     local dst=$2
-    local src_size=$(df -B1 "$src" | awk 'NR==2 {print $3}')
-    local dst_size=$(df -B1 "$dst" | awk 'NR==2 {print $2}')
+    local src_size
+    local dst_size
+    
+    src_size="$(df -B1 "$src" | awk 'NR==2 {print $3}')"
+    dst_size="$(df -B1 "$dst" | awk 'NR==2 {print $2}')"
+    
     if [ "$dst_size" -lt "$src_size" ]; then
         echo "Error: Destination device doesn't have enough space!"
-        echo "Source size: $(numfmt --to=iec-i --suffix=B $src_size)"
-        echo "Destination size: $(numfmt --to=iec-i --suffix=B $dst_size)"
+        echo "Source size: $(numfmt --to=iec-i --suffix=B "$src_size")"
+        echo "Destination size: $(numfmt --to=iec-i --suffix=B "$dst_size")"
         exit 1
     fi
 }
 
-# Function to show progress
+# Displays a progress bar during the backup process
+# Args: $1 - process ID to monitor
 show_progress() {
     local pid=$1
-    local src_size=$(df -B1 / | awk 'NR==2 {print $3}')
+    local src_size
+    local dst_used
+    local progress
+    
+    src_size="$(df -B1 / | awk 'NR==2 {print $3}')"
+    
     while kill -0 $pid 2>/dev/null; do
-        local dst_used=$(df -B1 "$DST_MOUNT_ROOT" | awk 'NR==2 {print $3}')
-        local progress=$((dst_used * 100 / src_size))
+        dst_used="$(df -B1 "$DST_MOUNT_ROOT" | awk 'NR==2 {print $3}')"
+        progress=$((dst_used * 100 / src_size))
         echo -ne "Progress: $progress% \r"
         sleep 1
     done
     echo -ne '\n'
 }
+
 
 # Check if script is run as root
 if [ "$(id -u)" != "0" ]; then
@@ -148,7 +183,7 @@ fi
 # Create optimized ext4 filesystem on second partition
 echo "Creating ext4 filesystem on /dev/sdb2..."
 if ! mkfs.ext4 -F \
-    -O has_journal,extent,flex_bg,metadata_csum,64bit,dir_nlink,extra_isize,fast_commit \
+    -O has_journal,extent,flex_bg,metadata_csum,64bit,dir_nlink,extra_isize \
     -E lazy_itable_init=0,lazy_journal_init=0,discard \
     -b 4096 \
     -I 256 \

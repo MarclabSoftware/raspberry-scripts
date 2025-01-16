@@ -1,29 +1,45 @@
 #!/bin/bash
 
-# Imposta strict mode per catturare errori
+###############################################################################
+# USB Device Scanner
+# 
+# This script scans and lists all USB devices connected to the system,
+# displaying their device paths and serial numbers. It uses parallel processing
+# for improved performance on systems with multiple cores.
+#
+# The script implements error handling and skips irrelevant devices like
+# bus entries. It's particularly useful for system administrators and
+# developers who need to inventory USB devices.
+#
+# Author: LaboDJ
+# Version: 1.0
+# Last Updated: 2025/01/16
+###############################################################################
+
+# Set strict mode to catch errors
 set -euo pipefail
 
-# Funzione per processare ogni dispositivo
+# Function to process each device
 process_device() {
     local sysdevpath="$1"
     local syspath="${sysdevpath%/dev}"
     local devname
     local properties
 
-    # Ottiene il nome del device in modo più efficiente
+    # Get device name more efficiently
     devname=$(udevadm info -q name -p "$syspath") || return
 
-    # Salta i dispositivi bus
+    # Skip bus devices
     [[ "$devname" == bus/* ]] && return
 
-    # Ottiene le proprietà in una singola chiamata
+    # Get properties in a single call
     properties=$(udevadm info -q property --export -p "$syspath") || return
 
-    # Estrae ID_SERIAL usando grep invece di eval
+    # Extract ID_SERIAL using grep instead of eval
     local serial
     serial=$(echo "$properties" | grep '^ID_SERIAL=' | cut -d= -f2)
 
-    # Salta se non c'è serial
+    # Skip if no serial number is found
     [[ -z "$serial" ]] && return
 
     echo "/dev/$devname - $serial"
@@ -31,6 +47,6 @@ process_device() {
 
 export -f process_device
 
-# Usa xargs per processare in parallelo
+# Use xargs to process in parallel
 find /sys/bus/usb/devices/usb*/ -name dev -print0 |
     xargs -0 -I {} -P "$(nproc)" bash -c 'process_device "$@"' _ {}

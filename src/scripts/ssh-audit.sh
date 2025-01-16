@@ -1,5 +1,41 @@
 #!/usr/bin/env bash
 
+###############################################################################
+# SSH Security Audit Script
+#
+# This script automates the download, setup, and execution of ssh-audit tool
+# to perform security assessments of SSH configurations. It includes error
+# handling, cleanup procedures, and verification of required dependencies.
+#
+# Features:
+# - Automatic download and extraction of latest ssh-audit
+# - Security check to prevent root execution
+# - Dependency verification (curl, unzip, python3)
+# - Automatic cleanup of temporary files
+# - Comprehensive error handling
+#
+# Usage:
+#   ./ssh-audit.sh
+#
+# Note: This script must be run as a non-root user with sufficient permissions
+# to execute Python scripts and access SSH configurations.
+#
+# Additional Options (commented out in script):
+# - List all policies: ./ssh-audit.py -L
+# - Use specific policy: ./ssh-audit.py -P "Policy Name" localhost
+#
+# Requirements:
+# - curl
+# - unzip
+# - python3
+# - Internet connection
+#
+# Author: LaboDJ
+# Version: 1.0
+# Last Updated: 2025/01/16
+###############################################################################
+
+
 # Enable strict mode for better error handling
 # -e: exit on error
 # -u: exit on undefined variable
