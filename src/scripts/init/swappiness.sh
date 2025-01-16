@@ -2,7 +2,7 @@
 
 setSwappiness() {
     # Defaults
-    local swappiness_default=60
+    local swappiness_default=10
     # Dirs
     local swappiness_conf_f="/etc/sysctl.d/swappiness.conf"
     # Apply default if conf is not found
