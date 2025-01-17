@@ -24,11 +24,11 @@
 # - Configuration files backup
 #
 # Backup Locations:
-# - Primary backup directory: /home/labo/backups
-# - Docker base directory: /home/labo/docker
+# - Primary backup directory: /home/${SUDO_USER}/backups
+# - Docker base directory: /home/${SUDO_USER}/docker
 #
 # Requirements:
-# - Root privileges
+# - Root privileges (run with sudo)
 # - Docker
 # - apt package manager
 # - rpi-eeprom-update utility
@@ -37,14 +37,11 @@
 # Usage:
 #   sudo ./script.sh
 #
-# Note: A system reboot is recommended after script completion
-# to apply all updates properly.
 #
 # Author: LaboDJ
-# Version: 1.0
+# Version: 1.1
 # Last Updated: 2025/01/16
 ###############################################################################
-
 
 set -euo pipefail
 IFS=$'\n\t'
@@ -52,11 +49,13 @@ IFS=$'\n\t'
 #==============================================================================
 # Configuration
 #==============================================================================
-readonly BACKUP_DIR="/home/labo/backups"
+# Get the real user who executed sudo
+readonly REAL_USER="${SUDO_USER:-$USER}"
+readonly BACKUP_DIR="/home/${REAL_USER}/backups"
 BACKUP_FILE="${BACKUP_DIR}/config-backup-$(date +%Y%m%d_%H%M%S).tar.gz"
 readonly BACKUP_FILE
 readonly DOCKER_CONTAINERS=("node-red")
-readonly DOCKER_BASE_DIR="/home/labo/docker"
+readonly DOCKER_BASE_DIR="/home/${REAL_USER}/docker"
 
 #==============================================================================
 # Utility Functions
@@ -107,22 +106,22 @@ create_backup() {
         /boot/firmware/cmdline.txt \
         /etc/ssh/sshd_config \
         /etc/ssh/sshd_config.d/* \
-        /home/labo/.ssh \
+        "/home/${REAL_USER}/.ssh" \
         /root/.ssh \
-        /etc/systemd/journald.conf.d/labo* \
-        /etc/systemd/resolved.conf.d/labo* \
-        /etc/systemd/timesyncd.conf.d/labo* \
+        /etc/systemd/journald.conf.d/"${REAL_USER}"* \
+        /etc/systemd/resolved.conf.d/"${REAL_USER}"* \
+        /etc/systemd/timesyncd.conf.d/"${REAL_USER}"* \
         /etc/systemd/network/end0* \
         /etc/systemd/network/eth0* \
-        /etc/systemd/system/labo* \
+        /etc/systemd/system/"${REAL_USER}"* \
         /etc/default/rpi-eeprom-update \
         /etc/sysctl.d/99-maxperfwiz.conf \
-        /etc/sysctl.d/labo-network.conf \
-        /etc/udev/rules.d/labo* \
+        /etc/sysctl.d/"${REAL_USER}"-network.conf \
+        /etc/udev/rules.d/"${REAL_USER}"* \
         /etc/udev/rules.d/66-maxperfwiz.rules \
-        /home/labo/.nanorc \
-        /root/.nanorc \
-        || log_warning "Some files could not be backed up"
+        /home/"${REAL_USER}"/.nanorc \
+        /root/.nanorc ||
+        log_warning "Some files could not be backed up"
 
     chmod 600 "${BACKUP_FILE}"
     log_info "Backup created at ${BACKUP_FILE}"
