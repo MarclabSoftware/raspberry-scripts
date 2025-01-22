@@ -2,7 +2,7 @@
 
 ###############################################################################
 # IP-Based Firewall Configuration Script
-# 
+#
 # This script configures a sophisticated firewall using iptables and ipset,
 # allowing traffic only from specified countries while implementing various
 # security measures including:
@@ -34,12 +34,8 @@
 # Last Updated: 2025/01/16
 ###############################################################################
 
-
-# Enable strict mode for better error handling and debugging
-# -e: exit on error
-# -u: treat unset variables as errors
-# -o pipefail: return the exit status of the last command in a pipe that failed
-set -euo pipefail
+# Enable strict mode for better error handling and debugging (https://vaneyckt.io/posts/safer_bash_scripts_with_set_euxo_pipefail/)
+set -Eeuo pipefail
 
 ###################
 # Global Constants
@@ -51,6 +47,9 @@ declare -r DEFAULT_COUNTRIES="IT"
 # Get the directory where the script is located
 SCRIPT_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" &>/dev/null && pwd)
 readonly SCRIPT_DIR
+
+# Country IPs downloader script
+declare -r COUNTRY_IPS_DOWNLOADER="$SCRIPT_DIR/country_ips_downloader.sh"
 
 # Directory structure for IP lists
 declare -r IP_LIST_DIR="$SCRIPT_DIR/lists"
@@ -92,8 +91,7 @@ handle_error() {
     local exit_code=$?
     local line_number=$1
     log "ERROR" "Script failed at line $line_number with exit code $exit_code"
-    cleanup
-    exit $exit_code
+    exit "$exit_code"
 }
 
 # Setup enhanced signal handlers
@@ -136,7 +134,6 @@ log() {
 # Usage: die "Error message"
 die() {
     log "ERROR" "$*"
-    cleanup
     exit 1
 }
 
@@ -388,9 +385,11 @@ main() {
 
     $USE_BLOCKLIST && download_blocklists
 
-    cd "$IP_LIST_DIR" || die "Failed to change directory"
+    [[ -f "$COUNTRY_IPS_DOWNLOADER" && -x "$COUNTRY_IPS_DOWNLOADER" ]] || die "$COUNTRY_IPS_DOWNLOADER script not found/executable"
 
-    retry_command ./bashransomvirusprotector.sh -c "$ALLOWED_COUNTRIES" >"$ALLOW_LIST_DIR/countries.txt"
+    retry_command "$COUNTRY_IPS_DOWNLOADER" -c "$ALLOWED_COUNTRIES" >"$ALLOW_LIST_DIR/countries.txt"
+
+    cd "$IP_LIST_DIR" || die "Failed to change directory"
 
     if [[ -z "$(ls -A "$BLOCK_LIST_DIR")" ]]; then
         iprange --optimize "$ALLOW_LIST_DIR"/* >&$FD_IPRANGE

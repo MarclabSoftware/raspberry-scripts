@@ -5,13 +5,15 @@
 # Original by Marco Marcoaldi @ Managed Server S.r.l.
 # Enhanced version with performance optimizations and security improvements by LaboDJ
 #
-# Last Updated: 2025/01/21
+# Last Updated: 2025/01/22
 #
 # --------------------------------------------------------------------------------------------
 
-# Enable strict mode and error handling
-set -euo pipefail
+# Enable strict mode and error handling (https://vaneyckt.io/posts/safer_bash_scripts_with_set_euxo_pipefail/)
+set -Eeuo pipefail
 IFS=$'\n\t'
+export LC_ALL=C
+export LANG=C
 
 ###################
 # Global Constants
@@ -42,29 +44,51 @@ declare countrieslist=""
 ###################
 
 cleanup() {
-    local exit_code=$?
     [[ -d "$TEMP_DIR" ]] && rm -rf "$TEMP_DIR"
     [[ -f "$LOCK_FILE" ]] && rm -f "$LOCK_FILE"
-    exit "$exit_code"
 }
-
-trap cleanup EXIT
-trap 'exit 1' INT TERM
 
 ###################
 # Logging Functions
 ###################
 
+# Enhanced logging function with timestamp and PID
+# Usage: log "INFO" "Message"
 log() {
     local level="$1"
     shift
-    printf '[%s] [%s] [PID:%d] %s\n' "$(date -u '+%Y-%m-%d %H:%M:%S.%3N')" "$level" "$$" "$*" >&2
+    local timestamp
+    local pid
+    local format='%Y-%m-%d %H:%M:%S.%N'
+
+    timestamp=$(date +"$format" | cut -b1-23) || return 1
+    pid=$$
+
+    printf '[%s] [%s] [PID:%d] %s\n' "$timestamp" "$level" "$pid" "$*" >&2
 }
 
+handle_error() {
+    local exit_code=$?
+    local line_number=$1
+    log "ERROR" "Script failed at line $line_number with exit code $exit_code"
+    exit "$exit_code"
+}
+
+# Fatal error handler
+# Usage: die "Error message"
 die() {
     log "ERROR" "$*"
     exit 1
 }
+
+# Handle SIGINT (Ctrl+C)
+trap 'log "INFO" "Received SIGINT"; exit 130' INT
+# Handle SIGTERM
+trap 'log "INFO" "Received SIGTERM"; exit 143' TERM
+# Handle ERR
+trap 'handle_error $LINENO' ERR
+# Handle EXIT
+trap 'cleanup' EXIT
 
 ###################
 # Utility Functions
@@ -175,6 +199,8 @@ verify_md5() {
 process_addresses() {
     local cpus
     cpus=$(nproc)
+    local buffer_size
+    buffer_size="$(free -m | awk '/Mem:/ {print int($2/4)}')M"
     local total_lines
     total_lines=$(wc -l <"$TEMP_DIR/$FN")
     local chunk=$((total_lines / cpus + 1))
@@ -209,7 +235,7 @@ EOF
     wait
 
     # Efficient sorting and uniquing
-    sort -u -T "$TEMP_DIR" "$TEMP_DIR"/part* || die "Sort failed"
+    sort -S "$buffer_size" -T "$TEMP_DIR" -u --parallel="$cpus" "$TEMP_DIR"/part* || die "Sort failed"
 }
 
 main() {
