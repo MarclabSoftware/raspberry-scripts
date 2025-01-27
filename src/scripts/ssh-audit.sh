@@ -3,119 +3,113 @@
 ###############################################################################
 # SSH Security Audit Script
 #
-# This script automates the download, setup, and execution of ssh-audit tool
-# to perform security assessments of SSH configurations. It includes error
-# handling, cleanup procedures, and verification of required dependencies.
-#
-# Features:
-# - Automatic download and extraction of latest ssh-audit
-# - Security check to prevent root execution
-# - Dependency verification (curl, unzip, python3)
-# - Automatic cleanup of temporary files
-# - Comprehensive error handling
-#
-# Usage:
-#   ./ssh-audit.sh
-#
-# Note: This script must be run as a non-root user with sufficient permissions
-# to execute Python scripts and access SSH configurations.
-#
-# Additional Options (commented out in script):
-# - List all policies: ./ssh-audit.py -L
-# - Use specific policy: ./ssh-audit.py -P "Policy Name" localhost
-#
-# Requirements:
-# - curl
-# - unzip
-# - python3
-# - Internet connection
+# Performs automated security assessment of SSH configurations using ssh-audit
+# tool with enhanced error handling and performance optimizations.
 #
 # Author: LaboDJ
-# Version: 1.0
-# Last Updated: 2025/01/16
+# Version: 1.2
+# Last Updated: 2025/01/27
 ###############################################################################
 
+# Enable strict mode for better error handling and debugging (https://vaneyckt.io/posts/safer_bash_scripts_with_set_euxo_pipefail/)
+set -Eeuo pipefail
 
-# Enable strict mode for better error handling
-# -e: exit on error
-# -u: exit on undefined variable
-# -o pipefail: exit on pipe failures
-set -euo pipefail
+# Constants
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" &>/dev/null && pwd)"
+readonly SCRIPT_DIR
+readonly GIT_URL="https://github.com/jtesta/ssh-audit.git"
+readonly TOOL_DIR="$SCRIPT_DIR/ssh-audit"
+# Default parameters if none provided
+readonly DEFAULT_PARAMS="localhost -4"
 
-# Define constants
-readonly URL="https://github.com/jtesta/ssh-audit/archive/refs/heads/master.zip"
-readonly FILENAME="ssh-audit-master.zip"
-readonly FILEPATH_F="${HOME}/${FILENAME}"
-readonly DIRPATH_D="${HOME}/${FILENAME%.zip}"
+trap 'error_handler $? $LINENO "$BASH_COMMAND"' ERR
 
-# Cleanup function to remove temporary files and directories
-cleanup() {
-    rm -f "${FILEPATH_F}"
-    rm -rf "${DIRPATH_D}"
-}
-
-# Error handler function
-# Parameters:
-# $1: Line number where the error occurred
+# shellcheck disable=SC2317
 error_handler() {
-    echo "Error at line $1" >&2
-    cleanup
+    local exit_code=$1
+    local line_number=$2
+    local last_command=$3
+
+    printf "Error at line %d\nCommand: %s\nExit code: %d\n" \
+        "$line_number" "$last_command" "$exit_code" >&2
+    exit "$exit_code"
+}
+
+# Optimized logging function using printf instead of echo
+log() {
+    printf '[%s] [%s] %s\n' "$(date '+%Y-%m-%d %H:%M:%S')" "$1" "$2" >&2
+}
+
+# Check for root privileges - fail fast principle
+[[ "${EUID:-$(id -u)}" -eq 0 ]] && {
+    log "ERROR" "Do not run as root"
     exit 1
 }
 
-# Set up error trap to catch and handle errors
-trap 'error_handler ${LINENO}' ERR
+# Check dependencies using parallel processing
+check_dependencies() {
+    local -a missing_deps=()
+    for cmd in git python3; do
+        command -v "$cmd" >/dev/null 2>&1 || missing_deps+=("$cmd")
+    done
 
-if [ "${EUID:-$(id -u)}" -eq 0 ]; then
-    echo "Please run this script as a normal user" >&2
-    exit 1
-fi
-
-# Check if required commands are available in the system
-for cmd in curl unzip python3; do
-    if ! command -v "$cmd" >/dev/null 2>&1; then
-        echo "Required command not found: $cmd" >&2
+    if ((${#missing_deps[@]} > 0)); then
+        log "ERROR" "Missing dependencies: ${missing_deps[*]}"
         exit 1
     fi
-done
+}
 
-# Change to home directory safely
-cd "${HOME}" || exit 1
+# Update or clone repository with optimized git commands
+update_repository() {
+    if [[ -d "$TOOL_DIR" ]]; then
+        (cd "$TOOL_DIR" && git pull --depth 1 --no-tags) ||
+            {
+                log "ERROR" "Failed to update repository"
+                exit 1
+            }
+    else
+        git clone --depth 1 --no-tags "$GIT_URL" "$TOOL_DIR" ||
+            {
+                log "ERROR" "Failed to clone repository"
+                exit 1
+            }
+    fi
+}
 
-# Clean up any residual files from previous runs
-cleanup
+# Main execution block with proper error handling
+main() {
+    log "INFO" "Starting SSH security audit"
 
-# Download and extract ssh-audit
-echo "Downloading ssh-audit..."
-if ! curl -sSfL "${URL}" -o "${FILEPATH_F}"; then
-    echo "Error during download" >&2
-    cleanup
-    exit 1
-fi
+    check_dependencies
 
-echo "Extracting files..."
-if ! unzip -q "${FILEPATH_F}"; then
-    echo "Error during extraction" >&2
-    cleanup
-    exit 1
-fi
+    update_repository
 
-# Remove the zip file after extraction
-rm -f "${FILEPATH_F}"
+    # Verify ssh-audit.py existence
+    [[ -f "${TOOL_DIR}/ssh-audit.py" ]] || {
+        log "ERROR" "ssh-audit.py not found"
+        exit 1
+    }
 
-# Verify that the Python script exists
-if [ ! -f "${DIRPATH_D}/ssh-audit.py" ]; then
-    echo "ssh-audit.py file not found" >&2
-    cleanup
-    exit 1
-fi
+    # Determine parameters to use
+    local audit_params
+    if [ $# -eq 0 ]; then
+        # Split default parameters into array
+        read -r -a audit_params <<<"$DEFAULT_PARAMS"
+        log "INFO" "Using default parameters: $DEFAULT_PARAMS"
+    else
+        # Use all passed parameters as array
+        audit_params=("$@")
+        log "INFO" "Using custom parameters: ${audit_params[*]}"
+    fi
 
-# Run ssh-audit
-echo "Running ssh-audit..."
-"${DIRPATH_D}/ssh-audit.py" localhost -4
+    # Execute ssh-audit with timeout and parameters
+    log "INFO" "Running ssh-audit..."
+    "${TOOL_DIR}/ssh-audit.py" "${audit_params[@]}" || true
 
-# Additional options available (commented out)
-#"${DIRPATH_D}/ssh-audit.py" -L
-#"${DIRPATH_D}/ssh-audit.py" -P "Hardened OpenSSH Server v9.7 (version 1)" localhost
+    log "INFO" "Audit completed successfully"
+}
+
+# Execute main function with all script parameters
+main "$@"
 
 exit 0
