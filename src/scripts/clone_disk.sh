@@ -105,15 +105,15 @@ check_if_backup() {
     local src_partuuid_1 src_partuuid_2 dst_partuuid_1 dst_partuuid_2
 
     # Check if destination partitions exist
-    if [ ! -b "${DST_DEVICE}1" ] || [ ! -b "${DST_DEVICE}2" ]; then
+    if [ ! -b "$DST_PART1" ] || [ ! -b "$DST_PART2" ]; then
         return 1
     fi
 
     # Get PARTUUIDs
-    src_partuuid_1=$(blkid -s PARTUUID -o value "${SRC_DEVICE}1")
-    src_partuuid_2=$(blkid -s PARTUUID -o value "${SRC_DEVICE}2")
-    dst_partuuid_1=$(blkid -s PARTUUID -o value "${DST_DEVICE}1")
-    dst_partuuid_2=$(blkid -s PARTUUID -o value "${DST_DEVICE}2")
+    src_partuuid_1=$(blkid -s PARTUUID -o value "$SRC_PART1")
+    src_partuuid_2=$(blkid -s PARTUUID -o value "$SRC_PART2")
+    dst_partuuid_1=$(blkid -s PARTUUID -o value "$DST_PART1")
+    dst_partuuid_2=$(blkid -s PARTUUID -o value "$DST_PART2")
 
     # Compare PARTUUIDs
     if [ "$src_partuuid_1" = "$dst_partuuid_1" ] && [ "$src_partuuid_2" = "$dst_partuuid_2" ]; then
@@ -128,11 +128,11 @@ perform_incremental_update() {
     echo "Performing incremental update of existing backup..."
 
     # Mount destination partitions
-    mount "${DST_DEVICE}2" "$DST_MOUNT_ROOT"
+    mount "$DST_PART2" "$DST_MOUNT_ROOT"
     verify_mount "$DST_MOUNT_ROOT"
 
     mkdir -p "$DST_MOUNT_ROOT/boot/firmware"
-    mount "${DST_DEVICE}1" "$DST_MOUNT_ROOT/boot/firmware"
+    mount "$DST_PART1" "$DST_MOUNT_ROOT/boot/firmware"
     verify_mount "$DST_MOUNT_ROOT/boot/firmware"
 
     # Check space
@@ -202,7 +202,7 @@ select_disks() {
         fi
 
         # Verify if source disk is the system disk
-        if ! grep -q "/dev/${SRC_DISK}2 / " /proc/mounts; then
+        if ! grep -q "/dev/${SRC_DISK}2 / " /proc/mounts && ! grep -q "/dev/${SRC_DISK}p2 / " /proc/mounts; then
             echo "Warning: /dev/$SRC_DISK doesn't appear to be the system disk!"
             read -p "Are you sure this is the correct source disk? (yes/no) " -r
             if [[ ! $REPLY =~ ^yes$ ]]; then
@@ -230,6 +230,23 @@ select_disks() {
     # Export variables for use in main script
     SRC_DEVICE="/dev/$SRC_DISK"
     DST_DEVICE="/dev/$DST_DISK"
+
+    # Determine partition names based on device type
+    if [[ "$SRC_DISK" == nvme* ]]; then
+        SRC_PART1="${SRC_DEVICE}p1"
+        SRC_PART2="${SRC_DEVICE}p2"
+    else
+        SRC_PART1="${SRC_DEVICE}1"
+        SRC_PART2="${SRC_DEVICE}2"
+    fi
+
+    if [[ "$DST_DISK" == nvme* ]]; then
+        DST_PART1="${DST_DEVICE}p1"
+        DST_PART2="${DST_DEVICE}p2"
+    else
+        DST_PART1="${DST_DEVICE}1"
+        DST_PART2="${DST_DEVICE}2"
+    fi
 }
 
 # Perform full backup
@@ -248,7 +265,7 @@ perform_full_backup() {
     echo "Creating filesystems..."
 
     # Verify that partitions exist and are not mounted
-    for part in "${DST_DEVICE}1" "${DST_DEVICE}2"; do
+    for part in "$DST_PART1" "$DST_PART2"; do
         if [ ! -b "$part" ]; then
             echo "Error: Partition $part not found. Waiting 5 seconds for device..."
             sleep 5
@@ -265,14 +282,14 @@ perform_full_backup() {
     done
 
     # Create FAT filesystem on first partition
-    echo "Creating FAT filesystem on ${DST_DEVICE}1..."
-    if ! mkfs.vfat "${DST_DEVICE}1"; then
-        echo "Error creating FAT filesystem on ${DST_DEVICE}1"
+    echo "Creating FAT filesystem on $DST_PART1..."
+    if ! mkfs.vfat "$DST_PART1"; then
+        echo "Error creating FAT filesystem on $DST_PART1"
         return 1
     fi
 
     # Create optimized ext4 filesystem on second partition
-    echo "Creating ext4 filesystem on ${DST_DEVICE}2..."
+    echo "Creating ext4 filesystem on $DST_PART2..."
     if ! mkfs.ext4 -F \
         -O has_journal,extent,flex_bg,metadata_csum,64bit,dir_nlink,extra_isize \
         -E lazy_itable_init=0,lazy_journal_init=0,discard \
@@ -282,17 +299,17 @@ perform_full_backup() {
         -m 0 \
         -J size=64 \
         -L rootfs \
-        "${DST_DEVICE}2"; then
-        echo "Error creating ext4 filesystem on ${DST_DEVICE}2"
+        "$DST_PART2"; then
+        echo "Error creating ext4 filesystem on $DST_PART2"
         return 1
     fi
 
     # Mount and perform backup
-    mount "${DST_DEVICE}2" "$DST_MOUNT_ROOT"
+    mount "$DST_PART2" "$DST_MOUNT_ROOT"
     verify_mount "$DST_MOUNT_ROOT"
 
     mkdir -p "$DST_MOUNT_ROOT/boot/firmware"
-    mount "${DST_DEVICE}1" "$DST_MOUNT_ROOT/boot/firmware"
+    mount "$DST_PART1" "$DST_MOUNT_ROOT/boot/firmware"
     verify_mount "$DST_MOUNT_ROOT/boot/firmware"
 
     # Perform the actual backup using rsync
@@ -398,8 +415,8 @@ check_device "$SRC_DEVICE"
 check_device "$DST_DEVICE"
 
 # Verify source device is correct
-if ! grep -q "${SRC_DEVICE}2 / " /proc/mounts; then
-    echo "Error: ${SRC_DEVICE}2 is not mounted as root! Aborting for safety."
+if ! grep -q "$SRC_PART2 / " /proc/mounts; then
+    echo "Error: $SRC_PART2 is not mounted as root! Aborting for safety."
     exit 1
 fi
 
