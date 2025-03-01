@@ -15,8 +15,8 @@
 # Warning: This script will completely erase the destination drive!
 #
 # Author: LaboDJ
-# Version: 1.1
-# Last Updated: 2025/01/21
+# Version: 1.2
+# Last Updated: 2025/02/28
 # =============================================================================
 
 # Enable exit on error
@@ -99,6 +99,60 @@ show_progress() {
     echo -ne '\n'
 }
 
+# Copy root filesystem
+# Args: $1 - destination mount point
+copy_root_filesystem() {
+    local dst_mount="$1"
+    echo "Copying root filesystem..."
+    rsync -aHAXx --numeric-ids --info=progress2 \
+        --exclude={"/dev/*","/proc/*","/sys/*","/tmp/*","/run/*","/mnt/*","/media/*","/lost+found","/boot/firmware/*"} \
+        --exclude="/var/cache/apt/archives/*" \
+        --exclude="/var/log/*" \
+        --exclude="/var/tmp/*" \
+        --exclude="*.log" \
+        --exclude="*.tmp" \
+        --exclude="*.pid" \
+        --exclude="*.swp" \
+        --delete \
+        --compress \
+        --compress-level=1 \
+        / "$dst_mount/" &
+
+    RSYNC_PID=$!
+    show_progress $RSYNC_PID
+    wait $RSYNC_PID
+}
+
+# Copy firmware partition
+# Args: $1 - destination firmware mount point
+copy_firmware_partition() {
+    local dst_firmware="$1"
+    echo "Copying firmware partition..."
+    rsync -aHAXx --numeric-ids --info=progress2 \
+        --compress \
+        --compress-level=1 \
+        /boot/firmware/ "$dst_firmware/"
+}
+
+# Verify filesystem integrity
+# Args: $1 - destination mount point
+verify_filesystem_integrity() {
+    local dst_mount="$1"
+    echo "Verifying data integrity..."
+
+    if ! rsync -avn --delete / "$dst_mount/" | grep -q "^$"; then
+        echo "Warning: Differences found in root filesystem!"
+        return 1
+    fi
+
+    if ! rsync -avn --delete /boot/firmware/ "$dst_mount/boot/firmware/" | grep -q "^$"; then
+        echo "Warning: Differences found in firmware partition!"
+        return 1
+    fi
+
+    return 0
+}
+
 # Check if destination disk is already a backup
 # Returns 0 if it's a backup, 1 if it's not
 check_if_backup() {
@@ -138,44 +192,12 @@ perform_incremental_update() {
     # Check space
     check_space "/" "$DST_MOUNT_ROOT"
 
-    # Update root filesystem
-    echo "Updating root filesystem..."
-    rsync -aHAXx --numeric-ids --info=progress2 \
-        --exclude={"/dev/*","/proc/*","/sys/*","/tmp/*","/run/*","/mnt/*","/media/*","/lost+found","/boot/firmware/*"} \
-        --exclude="/var/cache/apt/archives/*" \
-        --exclude="/var/log/*" \
-        --exclude="/var/tmp/*" \
-        --exclude="*.log" \
-        --exclude="*.tmp" \
-        --exclude="*.pid" \
-        --exclude="*.swp" \
-        --delete \
-        --compress \
-        --compress-level=1 \
-        / "$DST_MOUNT_ROOT/" &
+    # Copy filesystems
+    copy_root_filesystem "$DST_MOUNT_ROOT"
+    copy_firmware_partition "$DST_MOUNT_ROOT/boot/firmware"
 
-    RSYNC_PID=$!
-    show_progress $RSYNC_PID
-    wait $RSYNC_PID
-
-    # Update firmware partition
-    echo "Updating firmware partition..."
-    rsync -aHAXx --numeric-ids --info=progress2 \
-        --compress \
-        --compress-level=1 \
-        /boot/firmware/ "$DST_MOUNT_ROOT/boot/firmware/"
-
-    # Verify data integrity
-    echo "Verifying data integrity..."
-    if ! rsync -avn --delete / "$DST_MOUNT_ROOT/" | grep -q "^$"; then
-        echo "Warning: Differences found in root filesystem!"
-        return 1
-    fi
-
-    if ! rsync -avn --delete /boot/firmware/ "$DST_MOUNT_ROOT/boot/firmware/" | grep -q "^$"; then
-        echo "Warning: Differences found in firmware partition!"
-        return 1
-    fi
+    # Verify integrity
+    verify_filesystem_integrity "$DST_MOUNT_ROOT"
 
     # Sync and unmount
     echo "Syncing filesystems..."
@@ -252,45 +274,58 @@ select_disks() {
 # Perform full backup
 perform_full_backup() {
     echo "Performing full backup..."
+    local src_part2_used dst_disk_size src_disk_id
 
-    # 1. Create exact copy of partition table including PARTUUIDs
-    echo "Creating exact partition table copy..."
-    dd if="$SRC_DEVICE" of="$DST_DEVICE" bs=1M count=4 conv=fsync status=progress
+    # Get source partition sizes and disk ID
+    src_part2_used=$(df -B1 "$SRC_PART2" | awk 'NR==2 {print $3}')
+    dst_disk_size=$(blockdev --getsize64 "$DST_DEVICE")
+    src_disk_id=$(sfdisk --disk-id "$SRC_DEVICE")
 
-    # Wait for kernel to update partition table
-    sleep 2
-    partprobe "$DST_DEVICE"
-
-    # 2. Create filesystems with same parameters
-    echo "Creating filesystems..."
-
-    # Verify that partitions exist and are not mounted
-    for part in "$DST_PART1" "$DST_PART2"; do
-        if [ ! -b "$part" ]; then
-            echo "Error: Partition $part not found. Waiting 5 seconds for device..."
-            sleep 5
-            if [ ! -b "$part" ]; then
-                echo "Error: Partition $part still not found"
-                return 1
-            fi
-        fi
-
-        if mountpoint -q "$part" || grep -q "^$part " /proc/mounts; then
-            echo "Error: $part is still mounted!"
-            return 1
-        fi
-    done
-
-    # Create FAT filesystem on first partition
-    echo "Creating FAT filesystem on $DST_PART1..."
-    if ! mkfs.vfat "$DST_PART1"; then
-        echo "Error creating FAT filesystem on $DST_PART1"
+    # Check if destination disk has enough space
+    local required_size=$((1024 * 1024 * 1024 + src_part2_used + (50 * 1024 * 1024)))
+    if [ "$dst_disk_size" -lt "$required_size" ]; then
+        echo "Error: Destination disk is too small!"
+        echo "Required space: $(numfmt --to=iec-i --suffix=B "$required_size")"
+        echo "Available space: $(numfmt --to=iec-i --suffix=B "$dst_disk_size")"
         return 1
     fi
 
-    # Create optimized ext4 filesystem on second partition
-    echo "Creating ext4 filesystem on $DST_PART2..."
-    if ! mkfs.ext4 -F \
+    # Create new MBR partition table
+    echo "Creating new MBR partition table..."
+    parted -s "$DST_DEVICE" mklabel msdos
+
+    # Create partitions with fixed sizes
+    echo "Creating partitions..."
+    parted -s "$DST_DEVICE" mkpart primary fat32 0G 1G
+    parted -s "$DST_DEVICE" mkpart primary ext4 1G 100%
+
+    # Force kernel to reread partition table
+    echo "Updating partition table..."
+    partprobe "$DST_DEVICE"
+
+    # Wait for partition devices to appear
+    echo "Waiting for partition devices..."
+    for i in {1..10}; do
+        if [ -b "$DST_PART1" ] && [ -b "$DST_PART2" ]; then
+            break
+        fi
+        echo "Waiting for partitions to appear (attempt $i/10)..."
+        sleep 1
+        partprobe "$DST_DEVICE"
+    done
+
+    # Final check for partition devices
+    if [ ! -b "$DST_PART1" ] || [ ! -b "$DST_PART2" ]; then
+        echo "Error: Partition devices did not appear after waiting!"
+        return 1
+    fi
+
+    # Create filesystems
+    echo "Creating FAT32 filesystem on first partition..."
+    mkfs.vfat "$DST_PART1"
+
+    echo "Creating ext4 filesystem on second partition..."
+    mkfs.ext4 -F \
         -O has_journal,extent,flex_bg,metadata_csum,64bit,dir_nlink,extra_isize \
         -E lazy_itable_init=0,lazy_journal_init=0,discard \
         -b 4096 \
@@ -299,10 +334,7 @@ perform_full_backup() {
         -m 0 \
         -J size=64 \
         -L rootfs \
-        "$DST_PART2"; then
-        echo "Error creating ext4 filesystem on $DST_PART2"
-        return 1
-    fi
+        "$DST_PART2"
 
     # Mount and perform backup
     mount "$DST_PART2" "$DST_MOUNT_ROOT"
@@ -312,42 +344,27 @@ perform_full_backup() {
     mount "$DST_PART1" "$DST_MOUNT_ROOT/boot/firmware"
     verify_mount "$DST_MOUNT_ROOT/boot/firmware"
 
-    # Perform the actual backup using rsync
-    echo "Copying root filesystem..."
-    rsync -aHAXx --numeric-ids --info=progress2 \
-        --exclude={"/dev/*","/proc/*","/sys/*","/tmp/*","/run/*","/mnt/*","/media/*","/lost+found","/boot/firmware/*"} \
-        --exclude="/var/cache/apt/archives/*" \
-        --exclude="/var/log/*" \
-        --exclude="/var/tmp/*" \
-        --exclude="*.log" \
-        --exclude="*.tmp" \
-        --exclude="*.pid" \
-        --exclude="*.swp" \
-        --delete \
-        --compress \
-        --compress-level=1 \
-        / "$DST_MOUNT_ROOT/" &
+    # Copy filesystems
+    copy_root_filesystem "$DST_MOUNT_ROOT"
+    copy_firmware_partition "$DST_MOUNT_ROOT/boot/firmware"
 
-    RSYNC_PID=$!
-    show_progress $RSYNC_PID
-    wait $RSYNC_PID
-
-    echo "Copying firmware partition..."
-    rsync -aHAXx --numeric-ids --info=progress2 \
-        --compress \
-        --compress-level=1 \
-        /boot/firmware/ "$DST_MOUNT_ROOT/boot/firmware/"
-
-    # Sync and unmount
+    # Sync filesystems
     echo "Syncing filesystems..."
     sync
 
+    # Unmount before setting disk ID
     echo "Unmounting destination partitions..."
     safe_unmount "$DST_MOUNT_ROOT/boot/firmware"
     safe_unmount "$DST_MOUNT_ROOT"
 
+    # Set the disk ID to match the source
+    echo "Setting disk ID to match source..."
+    sfdisk --disk-id "$DST_DEVICE" "$src_disk_id"
+
     return 0
 }
+# Main script execution
+# -----------------------------------------------------------------------------
 
 # Check required commands
 check_required_commands() {
@@ -355,15 +372,9 @@ check_required_commands() {
         "rsync"
         "mkfs.vfat"
         "mkfs.ext4"
-        "fsck.vfat"
-        "e2fsck"
+        "parted"
+        "sfdisk"
         "blkid"
-        "dd"
-        "partprobe"
-        "mountpoint"
-        "lsblk"
-        "grep"
-        "awk"
     )
 
     local missing_commands=()
@@ -428,7 +439,7 @@ if check_if_backup; then
         if perform_incremental_update; then
             echo "Incremental update completed successfully!"
         else
-            echo "Error during incremental update!"
+            echo "Error during incremental backup!"
             exit 1
         fi
     else
@@ -455,4 +466,5 @@ else
     fi
 fi
 
+echo "You can now safely remove the destination drive."
 exit 0
