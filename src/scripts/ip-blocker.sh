@@ -531,7 +531,6 @@ EOF
             log "WARN" "IPv6 range file is empty. Skipping IPv6 rule application."
         fi
     else
-        # (Questa logica è corretta)
         log "INFO" "IPv6 Geo-blocking disabled. Checking if ip6tables is installed to flush rules..."
         if command -v ip6tables &>/dev/null; then
             log "INFO" "ip6tables found. Flushing rules to ensure IPv6 is open."
@@ -569,6 +568,16 @@ apply_rules_nftables() {
         iptables -F LABO_DOCKER_USER 2>/dev/null || true
         iptables -X LABO_INPUT 2>/dev/null || true
         iptables -X LABO_DOCKER_USER 2>/dev/null || true
+    fi
+
+    if command -v ip6tables &>/dev/null; then
+        log "INFO" "Cleaning up legacy ip6tables rules..."
+        ip6tables -D INPUT -j LABO_INPUT_V6 2>/dev/null || true
+        ip6tables -D DOCKER-USER -j LABO_DOCKER_USER_V6 2>/dev/null || true
+        ip6tables -F LABO_INPUT_V6 2>/dev/null || true
+        ip6tables -F LABO_DOCKER_USER_V6 2>/dev/null || true
+        ip6tables -X LABO_INPUT_V6 2>/dev/null || true
+        ip6tables -X LABO_DOCKER_USER_V6 2>/dev/null || true
     fi
 
     local nft_set_elements_v4
@@ -670,11 +679,6 @@ apply_rules_nftables() {
         }
 EOF
     log "INFO" "nftables ruleset applied successfully."
-
-    if [[ "$GEOBLOCK_IPV6" == false ]]; then
-        log "INFO" "Ensuring IPv6 is not blocked by this script."
-        nft delete table ip6 filter 2>/dev/null || true
-    fi
 }
 
 ###################
