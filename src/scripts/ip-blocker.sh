@@ -13,40 +13,37 @@
 #   otherwise falls back to 'iptables' and 'ipset'.
 # - Hybrid IPv4/IPv6 Support: Provides full Geo-IP filtering for IPv4 and
 #   optional, opt-in Geo-IP filtering for IPv6.
+# - Multiple Provider Support: Allows selection of Geo-IP data source.
+# - Default Deny Policy: Implements a "default deny" policy for the host's
+#   INPUT chain, while safely allowing Docker's FORWARD chain.
 # - Private Network Whitelist: Hardcoded rules prevent blocking RFC1918
 #   (LAN) and Docker internal traffic.
 # - Manual List Support: Automatically includes any user-created '*.v4'
 #   or '*.v6' files from the 'lists/allow' directory.
 # - SSH Brute Force Mitigation: Implements a robust rate-limit and temporary
-#   ban mechanism for incoming SSH connections.
+#   ban mechanism for incoming SSH connections on both IPv4 and IPv6.
 # - Docker Protection: Applies Geo-IP rules to Docker's 'forward' chain
 #   before Docker's own rules, protecting containers.
 # - Atomic & Safe: Applies all rules at once (atomically) to prevent
 #   a broken firewall state.
-# - Efficient: Uses 'iprange' to pre-calculate and optimize the final
-#   allowlist, minimizing per-packet CPU load.
+# - Secure: Uses a private, temporary directory for all working files.
 # - Robust: Includes connectivity checks, downloader retries with
 #   exponential backoff, and full error trapping.
 #
 # Usage:
-#   sudo ./ip-blocker-v4.sh [-c COUNTRIES] [-b] [-G] [-s SSH_PORT] [-h]
+#   sudo ./ip-blocker.sh [-c COUNTRIES] [-p PROVIDER] [-b] [-G] [-s SSH_PORT] [-h]
 #
 # Options:
 #   -c countries   Comma-separated list of allowed countries (e.g., IT,FR,DE)
+#   -p provider    Geo-IP provider: 'ipdeny', 'ripe', 'nirsoft' (default: ripe)
 #   -b             Enable (IPv4) blocklists.
 #   -G             Enable Geo-blocking for IPv6 (default: false, IPv6 is allowed).
 #   -s sshPort     Specify the SSH port (default: 22).
 #   -h             Display this help message.
 #
-# Requirements:
-#   - Root privileges (sudo)
-#   - curl, iprange, ping
-#   - Backend: 'nft' OR 'iptables', 'ipset' (and 'ip6tables', 'ip6set' if -G is used)
-#   - Active internet connection (for list downloads)
-#
 # Author: LaboDJ
-# Version: 4.0
-# Last Updated: 2025/11/10
+# Version: 5.0
+# Last Updated: 2025/11/15
 ###############################################################################
 
 # Enable strict mode:
@@ -67,7 +64,7 @@ declare -r DEFAULT_COUNTRIES="IT"
 SCRIPT_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" &>/dev/null && pwd)
 readonly SCRIPT_DIR
 # Path to the downloader script
-declare -r COUNTRY_IPS_DOWNLOADER="$SCRIPT_DIR/country_ips_downloader_ipdeny.sh"
+declare -r COUNTRY_IPS_DOWNLOADER="$SCRIPT_DIR/geo_ip_downloader.sh"
 # Directory structure
 declare -r IP_LIST_DIR="$SCRIPT_DIR/lists"
 declare -r ALLOW_LIST_DIR="$IP_LIST_DIR/allow"
@@ -80,9 +77,9 @@ declare -r NFT_TABLE_NAME="labo_firewall"
 # Names for our sets/ipsets
 declare -r ALLOW_LIST_NAME_V4="allowlist_v4"
 declare -r ALLOW_LIST_NAME_V6="allowlist_v6"
-# Final optimized IP list files
-declare -r IP_RANGE_FILE_V4="/tmp/$ALLOW_LIST_NAME_V4.iprange.txt"
-declare -r IP_RANGE_FILE_V6="/tmp/$ALLOW_LIST_NAME_V6.iprange.txt"
+# Geo-IP Provider settings
+declare -r DEFAULT_PROVIDER="ripe" # RIPE is the most accurate source
+declare -r ALLOWED_PROVIDERS="ipdeny ripe nirsoft"
 # Max retries for downloader
 declare -r MAX_RETRIES=10
 # Sites to test connectivity
@@ -97,6 +94,14 @@ declare ALLOWED_COUNTRIES="$DEFAULT_COUNTRIES"
 declare USE_BLOCKLIST=false
 declare SSH_PORT=22
 declare GEOBLOCK_IPV6=false # Default: IPv6 is NOT geo-blocked
+declare GEO_IP_PROVIDER="$DEFAULT_PROVIDER"
+
+# Secure temp directory
+declare TEMP_DIR=""
+# Final optimized IP list files (path is set in setup_temp_dir_and_traps)
+declare IP_RANGE_FILE_V4=""
+declare IP_RANGE_FILE_V6=""
+
 declare CLEANUP_REGISTERED=false
 declare FIREWALL_BACKEND=""
 declare -a REQUIRED_COMMANDS=()
@@ -139,18 +144,31 @@ die() {
     exit 1
 }
 
-# Cleanup temporary files on script exit
+# Cleanup secure temporary directory on script exit
 cleanup() {
     if [[ "$CLEANUP_REGISTERED" == true ]]; then
         log "INFO" "Performing cleanup..."
-        # Remove the final generated range files
-        rm -f "$IP_RANGE_FILE_V4" "$IP_RANGE_FILE_V6"
+        if [[ -n "$TEMP_DIR" && -d "$TEMP_DIR" ]]; then
+            rm -rf "$TEMP_DIR"
+            log "INFO" "Removed temporary directory: $TEMP_DIR"
+        fi
     fi
 }
 
-# Check for root privileges and setup traps
-check_root() {
+# Check for root, create secure temp dir, and setup traps
+setup_temp_dir_and_traps() {
+    # 1. Check root
     [[ "${EUID:-$(id -u)}" -ne 0 ]] && die "Please run as root/sudo"
+
+    # 2. Create secure temp directory
+    # -t: creates in $TMPDIR or /tmp, with a template
+    TEMP_DIR=$(mktemp -d -t ipblocker.XXXXXX) || die "Failed to create secure temp directory"
+    
+    # 3. Set global paths for our temp files
+    IP_RANGE_FILE_V4="$TEMP_DIR/$ALLOW_LIST_NAME_V4.iprange.txt"
+    IP_RANGE_FILE_V6="$TEMP_DIR/$ALLOW_LIST_NAME_V6.iprange.txt"
+    
+    # 4. Setup traps (now that TEMP_DIR is set)
     setup_signal_handlers
 }
 
@@ -162,10 +180,11 @@ check_root() {
 print_usage() {
     cat <<EOF
 
-Usage: $0 [-c countries] [-b] [-G] [-s sshPort] [-h]
+Usage: $0 [-c countries] [-p provider] [-b] [-G] [-s sshPort] [-h]
 
 Options:
     -c countries   Specify allowed countries (comma-separated, e.g., IT,DE,FR)
+    -p provider    Geo-IP provider: 'ipdeny', 'ripe', 'nirsoft' (default: $DEFAULT_PROVIDER)
     -b             Enable block lists (Applies to IPv4 only by default)
     -G             Enable Geo-blocking for IPv6 (default: false)
     -s sshPort     Specify SSH port (default: 22)
@@ -182,10 +201,11 @@ parse_arguments() {
     OPTIND=1
     local OPTERR=1
 
-    # New loop includes '-G' and removes '-6'
-    while getopts ":c:bs:hG" opt; do
+    # New loop includes '-G' and '-p'
+    while getopts ":c:p:bs:hG" opt; do
         case $opt in
         c) ALLOWED_COUNTRIES="$OPTARG" ;;
+        p) GEO_IP_PROVIDER="$OPTARG" ;;
         b) USE_BLOCKLIST=true ;;
         G) GEOBLOCK_IPV6=true ;; # Set IPv6 blocking to opt-in
         s) SSH_PORT="$OPTARG" ;;
@@ -203,6 +223,11 @@ parse_arguments() {
     if [[ ! "$ALLOWED_COUNTRIES" =~ ^[A-Z,]+$ ]]; then
         die "Country codes must be uppercase and comma-separated (e.g., IT,FR,DE)"
     fi
+    # Validate provider using a robust glob match
+    if ! [[ " $ALLOWED_PROVIDERS " == *"$GEO_IP_PROVIDER"* ]]; then
+        die "Invalid provider '$GEO_IP_PROVIDER'. Allowed providers are: $ALLOWED_PROVIDERS"
+    fi
+    log "INFO" "Using Geo-IP provider: $GEO_IP_PROVIDER"
 }
 
 ###################
@@ -234,7 +259,7 @@ detect_backend() {
         # Dynamically add IPv6 tools only if needed
         REQUIRED_COMMANDS=(curl ipset iptables iprange ping iptables-restore)
         if [[ "$GEOBLOCK_IPV6" == true ]]; then
-             REQUIRED_COMMANDS+=(ip6set ip6tables ip6tables-restore)
+             REQUIRED_COMMANDS+=(ip6tables ip6tables-restore)
         fi
         log "INFO" "Backend selected: iptables (legacy)"
     else
@@ -251,17 +276,22 @@ check_installed_commands() {
     [[ ${#missing_commands[@]} -eq 0 ]] || die "Missing commands: ${missing_commands[*]}"
 }
 
-# Retry a given command with exponential backoff
 retry_command() {
     local retries=0
     local command=("$@")
 
     while ((retries < MAX_RETRIES)); do
-        "${command[@]}" && return 0
+        # Use an 'if' statement to prevent 'set -e' from exiting the script
+        # if the command fails, allowing the loop to handle the error.
+        if "${command[@]}"; then
+            return 0 # Success
+        fi
+        
         ((retries++))
         log "WARN" "Command failed: ${command[*]}. Retry $retries/$MAX_RETRIES"
         sleep $((2 ** retries)) # 1s, 2s, 4s, 8s...
     done
+    
     die "Command failed after $MAX_RETRIES retries: ${command[*]}"
 }
 
@@ -273,8 +303,7 @@ retry_command() {
 download_blocklists() {
     log "INFO" "Downloading blocklists..."
     
-    # --- Export functions ---
-    # We must export functions so they are available in the subshells
+    # Export functions so they are available in the subshells
     # launched with '&' for parallel downloads.
     export -f retry_command
     export -f die
@@ -305,7 +334,7 @@ download_blocklists() {
         # Launch the download in a subshell
         (
             log "INFO" "Downloading: $url"
-            # -OJ is correct as confirmed by v1 script
+            # -OJ: Write output to a local file named like the remote file
             retry_command curl -sSL -OJ "$url" || die "Failed to download $url"
         ) &
     done
@@ -324,8 +353,8 @@ generate_ip_list() {
     [[ -f "$COUNTRY_IPS_DOWNLOADER" && -x "$COUNTRY_IPS_DOWNLOADER" ]] || die "$COUNTRY_IPS_DOWNLOADER script not found/executable"
 
     # Run the downloader script to get .list.v4 and .list.v6 files
-    log "INFO" "Downloading country IPs for: $ALLOWED_COUNTRIES"
-    retry_command "$COUNTRY_IPS_DOWNLOADER" -c "$ALLOWED_COUNTRIES"
+    log "INFO" "Downloading country IPs for: $ALLOWED_COUNTRIES (using $GEO_IP_PROVIDER)"
+    retry_command "$COUNTRY_IPS_DOWNLOADER" -c "$ALLOWED_COUNTRIES" -p "$GEO_IP_PROVIDER"
 
     cd "$IP_LIST_DIR" || die "Failed to change directory to $IP_LIST_DIR"
 
@@ -340,17 +369,19 @@ generate_ip_list() {
         log "INFO" "Optimizing IPv4 allow lists (no blocklist)."
         iprange --optimize "${v4_files[@]}" >"$IP_RANGE_FILE_V4"
     fi
+    
+    # CRITICAL: This is the primary safety check.
+    # If downloads failed or iprange failed, this check will cause the
+    # script to exit, preventing an empty ruleset from being applied.
     [[ -s "$IP_RANGE_FILE_V4" ]] || die "IPv4 range file $IP_RANGE_FILE_V4 not found or empty. Aborting."
     log "INFO" "IPv4 range list created at $IP_RANGE_FILE_V4"
 
     # --- Generate IPv6 List (Only if -G flag is used) ---
     if [[ "$GEOBLOCK_IPV6" == true ]]; then
-        log "INFO" "Combining IPv6 allow lists (skipping iprange optimization due to old version)..."
+        log "INFO" "Combining IPv6 allow lists..."
 
         # Use a glob that finds all .v6 files.
-        # This includes '*.list.v6' and 'manual.v6'.
-        # We use 'cat' to bypass the old iprange v1.0.4, which
-        # does not support IPv6 and tries to DNS-resolve the addresses.
+        # We use 'cat' as a simple combiner.
         cat "$ALLOW_LIST_DIR"/*.v6 > "$IP_RANGE_FILE_V6" 2>/dev/null || true
 
         if [[ ! -s "$IP_RANGE_FILE_V6" ]]; then
@@ -376,31 +407,34 @@ generate_ip_list() {
 
 # Helper to create/populate an ipset (v4 or v6)
 populate_ipset() {
-    # (Questa funzione è corretta, la lasciamo invariata)
     local set_name="$1"
     local range_file="$2"
     local family="$3"
     local set_cmd="ipset"
-    if [[ "$family" == "inet6" ]]; then
-        set_cmd="ip6set"
-    fi
+    
     log "INFO" "Configuring $set_cmd set '$set_name'..."
+    
+    # Create or flush the set
     if $set_cmd -n -q list "$set_name" &>/dev/null; then
         $set_cmd flush "$set_name"
     else
         $set_cmd create "$set_name" hash:net family "$family" || die "Failed to create $set_cmd set $set_name"
     fi
-    local IPSET_RESTORE_FILE="/tmp/$set_name.ipset.restore"
+    
+    # Use ipset restore for high-performance loading
+    local IPSET_RESTORE_FILE="$TEMP_DIR/$set_name.ipset.restore"
     echo "create $set_name hash:net family $family -exist" > "$IPSET_RESTORE_FILE"
     echo "flush $set_name" >> "$IPSET_RESTORE_FILE"
+    
     while IFS= read -r line; do
         echo "add $set_name $line" >> "$IPSET_RESTORE_FILE"
     done <"$range_file"
+    
     $set_cmd restore < "$IPSET_RESTORE_FILE" || die "Failed to restore $set_cmd set"
-    rm -f "$IPSET_RESTORE_FILE"
     log "INFO" "$set_cmd set '$set_name' populated."
 }
 
+# Apply all firewall rules using the legacy iptables backend
 apply_rules_iptables() {
     log "INFO" "Applying rules using iptables/ipset backend..."
 
@@ -411,84 +445,88 @@ apply_rules_iptables() {
     # 1. Populate IPv4 ipset
     populate_ipset "$ALLOW_LIST_NAME_V4" "$IP_RANGE_FILE_V4" "inet"
 
-    # Create/Flush our custom chains
+    # 2. Create/Flush our custom chains
     log "INFO" "Creating/Flushing custom iptables chains..."
     iptables -N LOG_AND_DROP_INPUT 2>/dev/null || iptables -F LOG_AND_DROP_INPUT
     iptables -N LOG_AND_DROP_DOCKER 2>/dev/null || iptables -F LOG_AND_DROP_DOCKER
     iptables -N LABO_INPUT 2>/dev/null || iptables -F LABO_INPUT
     iptables -N LABO_DOCKER_USER 2>/dev/null || iptables -F LABO_DOCKER_USER
 
-    # --- Remove old rules ---
+    # 3. Remove old rules
     log "INFO" "Cleaning up old rules from INPUT and DOCKER-USER chains..."
-    # Rimuovi i jump (vecchi e nuovi)
+    # Use 'while' loops to remove all existing instances of our rules
     while iptables -D INPUT -j LABO_INPUT 2>/dev/null; do :; done
     while iptables -D DOCKER-USER -j LABO_DOCKER_USER 2>/dev/null; do :; done
-    
-    # Rimuovi le vecchie regole del Geo-IP
     while iptables -D INPUT -m set ! --match-set $ALLOW_LIST_NAME_V4 src -j LOG_AND_DROP_INPUT 2>/dev/null; do :; done
     while iptables -D DOCKER-USER -m set ! --match-set $ALLOW_LIST_NAME_V4 src -j LOG_AND_DROP_DOCKER 2>/dev/null; do :; done
-    
-    # Rimuovi TUTTE le vecchie regole SSH (questo era il bug)
     while iptables -D INPUT -p tcp --dport "$SSH_PORT" -m state --state NEW -m recent --set --name SSH --rsource 2>/dev/null; do :; done
     while iptables -D INPUT -p tcp --dport "$SSH_PORT" -m state --state NEW -m recent --update --seconds 10 --hitcount 10 --name SSH --rsource -j LOG --log-prefix "SSH BRUTE DROP: " 2>/dev/null; do :; done
     while iptables -D INPUT -p tcp --dport "$SSH_PORT" -m state --state NEW -m recent --update --seconds 10 --hitcount 10 --name SSH --rsource -j DROP 2>/dev/null; do :; done
-    
-    # Rimuovi altre vecchie regole
     while iptables -D INPUT -m state --state INVALID -j DROP 2>/dev/null; do :; done
     while iptables -D INPUT -i lo -j ACCEPT 2>/dev/null; do :; done
     while iptables -D INPUT -m state --state RELATED,ESTABLISHED -j ACCEPT 2>/dev/null; do :; done
     while iptables -D DOCKER-USER -m state --state INVALID -j DROP 2>/dev/null; do :; done
     while iptables -D DOCKER-USER -i lo -j RETURN 2>/dev/null; do :; done
     while iptables -D DOCKER-USER -m state --state RELATED,ESTABLISHED -j RETURN 2>/dev/null; do :; done
-    
     log "INFO" "Cleanup of old rules complete."
 
-    # 2. Populate logging chains
+    # 4. Populate logging chains
     iptables -A LOG_AND_DROP_INPUT -j LOG --log-level 4 --log-prefix "INPUT DROP: "
     iptables -A LOG_AND_DROP_INPUT -j DROP
     iptables -A LOG_AND_DROP_DOCKER -j LOG --log-level 4 --log-prefix "DOCKER DROP: "
     iptables -A LOG_AND_DROP_DOCKER -j DROP
 
-    # 3. Apply IPv4 rules using iptables-restore to our custom chains
-    local IPTABLES_RULES_FILE="/tmp/iptables.rules"
+    # 5. Apply IPv4 rules using iptables-restore
+    local IPTABLES_RULES_FILE="$TEMP_DIR/iptables.rules"
     cat > "$IPTABLES_RULES_FILE" <<-EOF
 *filter
 :LABO_INPUT - [0:0]
 :LABO_DOCKER_USER - [0:0]
+
+# --- LABO_INPUT Chain (Default Deny for Host) ---
 -A LABO_INPUT -m state --state INVALID -j DROP
 -A LABO_INPUT -i lo -j ACCEPT
 -A LABO_INPUT -s 10.0.0.0/8 -j ACCEPT
 -A LABO_INPUT -s 172.16.0.0/12 -j ACCEPT
 -A LABO_INPUT -s 192.168.0.0/16 -j ACCEPT
 -A LABO_INPUT -m state --state RELATED,ESTABLISHED -j ACCEPT
+-A LABO_INPUT -p icmp -j ACCEPT
+# SSH Brute Force Mitigation (IPv4)
 -A LABO_INPUT -p tcp --dport $SSH_PORT -m state --state NEW -m recent --set --name SSH --rsource
 -A LABO_INPUT -p tcp --dport $SSH_PORT -m state --state NEW -m recent --update --seconds 10 --hitcount 10 --name SSH --rsource -j LOG --log-prefix "SSH BRUTE DROP: "
 -A LABO_INPUT -p tcp --dport $SSH_PORT -m state --state NEW -m recent --update --seconds 10 --hitcount 10 --name SSH --rsource -j DROP
+# Allow SSH only from Geo-IP list
+-A LABO_INPUT -p tcp --dport $SSH_PORT -m set --match-set $ALLOW_LIST_NAME_V4 src -j ACCEPT
+# Log and Drop non-allowlisted Geo-IP traffic
 -A LABO_INPUT -m set ! --match-set $ALLOW_LIST_NAME_V4 src -j LOG_AND_DROP_INPUT
--A LABO_INPUT -j RETURN
+# Default Deny: Drop all other traffic to host
+-A LABO_INPUT -j LOG --log-level 4 --log-prefix "INPUT DEFAULT DROP: "
+-A LABO_INPUT -j DROP
+
+# --- LABO_DOCKER_USER Chain (Default Allow for Docker) ---
 -A LABO_DOCKER_USER -m state --state INVALID -j DROP
 -A LABO_DOCKER_USER -i lo -j RETURN
 -A LABO_DOCKER_USER -s 10.0.0.0/8 -j RETURN
 -A LABO_DOCKER_USER -s 172.16.0.0/12 -j RETURN
 -A LABO_DOCKER_USER -s 192.168.0.0/16 -j RETURN
 -A LABO_DOCKER_USER -m state --state RELATED,ESTABLISHED -j RETURN
+# Geo-IP Filter: Drop traffic not in our allowlist
 -A LABO_DOCKER_USER -m set ! --match-set $ALLOW_LIST_NAME_V4 src -j LOG_AND_DROP_DOCKER
+# Default Allow: Return to Docker's chains
 -A LABO_DOCKER_USER -j RETURN
 COMMIT
 EOF
 
     iptables-restore --noflush < "$IPTABLES_RULES_FILE" || die "Failed to apply iptables rules"
-    rm -f "$IPTABLES_RULES_FILE"
 
-    # Inserisci i jump alle nostre catene pulite
+    # 6. Insert jumps to our new, clean chains
     iptables -I INPUT 1 -j LABO_INPUT
     iptables -I DOCKER-USER 1 -j LABO_DOCKER_USER
 
     log "INFO" "iptables (IPv4) rules applied successfully."
 
-    # 4. Handle IPv6 (Questa logica è corretta)
+    # 7. Handle IPv6
     if [[ "$GEOBLOCK_IPV6" == true ]]; then
-        # ... (Questa logica è già idempotente, non serve modificarla) ...
         log "INFO" "Applying ip6tables (IPv6) rules..."
         if [[ -s "$IP_RANGE_FILE_V6" ]]; then
             populate_ipset "$ALLOW_LIST_NAME_V6" "$IP_RANGE_FILE_V6" "inet6"
@@ -496,29 +534,43 @@ EOF
             ip6tables -N LABO_INPUT_V6 2>/dev/null || ip6tables -F LABO_INPUT_V6
             ip6tables -N LABO_DOCKER_USER_V6 2>/dev/null || ip6tables -F LABO_DOCKER_USER_V6
             
-            local IP6TABLES_RULES_FILE="/tmp/ip6tables.rules"
+            local IP6TABLES_RULES_FILE="$TEMP_DIR/ip6tables.rules"
             cat > "$IP6TABLES_RULES_FILE" <<-EOF
 *filter
 :LABO_INPUT_V6 - [0:0]
 :LABO_DOCKER_USER_V6 - [0:0]
+
+# --- LABO_INPUT_V6 Chain (Default Deny for Host) ---
 -A LABO_INPUT_V6 -m state --state INVALID -j DROP
 -A LABO_INPUT_V6 -i lo -j ACCEPT
 -A LABO_INPUT_V6 -s fe80::/10 -j ACCEPT
 -A LABO_INPUT_V6 -s fc00::/7 -j ACCEPT
+-A LABO_INPUT_V6 -p icmpv6 -j ACCEPT
 -A LABO_INPUT_V6 -m state --state RELATED,ESTABLISHED -j ACCEPT
+# SSH Brute Force Mitigation (IPv6, rate-limit only)
+-A LABO_INPUT_V6 -p tcp --dport $SSH_PORT -m hashlimit --hashlimit-name ssh_v6_limit --hashlimit-mode srcip --hashlimit-above 10/second -j LOG --log-prefix "IP6 SSH RATE-DROP: "
+-A LABO_INPUT_V6 -p tcp --dport $SSH_PORT -m hashlimit --hashlimit-name ssh_v6_limit --hashlimit-mode srcip --hashlimit-above 10/second -j DROP
+# Allow SSH only from Geo-IP list
+-A LABO_INPUT_V6 -p tcp --dport $SSH_PORT -m set --match-set $ALLOW_LIST_NAME_V6 src -j ACCEPT
+# Log and Drop non-allowlisted Geo-IP traffic
 -A LABO_INPUT_V6 -m set ! --match-set $ALLOW_LIST_NAME_V6 src -j DROP
--A LABO_INPUT_V6 -j RETURN
+# Default Deny: Drop all other traffic to host
+-A LABO_INPUT_V6 -j LOG --log-level 4 --log-prefix "INPUT6 DEFAULT DROP: "
+-A LABO_INPUT_V6 -j DROP
+
+# --- LABO_DOCKER_USER_V6 Chain (Default Allow for Docker) ---
 -A LABO_DOCKER_USER_V6 -m state --state INVALID -j DROP
 -A LABO_DOCKER_USER_V6 -i lo -j RETURN
 -A LABO_DOCKER_USER_V6 -s fe80::/10 -j RETURN
 -A LABO_DOCKER_USER_V6 -s fc00::/7 -j RETURN
 -A LABO_DOCKER_USER_V6 -m state --state RELATED,ESTABLISHED -j RETURN
+# Geo-IP Filter: Drop traffic not in our allowlist
 -A LABO_DOCKER_USER_V6 -m set ! --match-set $ALLOW_LIST_NAME_V6 src -j DROP
+# Default Allow: Return to Docker's chains
 -A LABO_DOCKER_USER_V6 -j RETURN
 COMMIT
 EOF
             ip6tables-restore --noflush < "$IP6TABLES_RULES_FILE" || die "Failed to apply ip6tables rules"
-            rm -f "$IP6TABLES_RULES_FILE"
 
             ip6tables -D INPUT -j LABO_INPUT_V6 2>/dev/null || true
             ip6tables -I INPUT 1 -j LABO_INPUT_V6
@@ -533,15 +585,13 @@ EOF
     else
         log "INFO" "IPv6 Geo-blocking disabled. Checking if ip6tables is installed to flush rules..."
         if command -v ip6tables &>/dev/null; then
-            log "INFO" "ip6tables found. Flushing rules to ensure IPv6 is open."
+            log "INFO" "ip6tables found. Flushing our custom chains to ensure IPv6 is open."
             ip6tables -D INPUT -j LABO_INPUT_V6 2>/dev/null || true
             ip6tables -D DOCKER-USER -j LABO_DOCKER_USER_V6 2>/dev/null || true
             ip6tables -F LABO_INPUT_V6 2>/dev/null || true
             ip6tables -F LABO_DOCKER_USER_V6 2>/dev/null || true
             ip6tables -X LABO_INPUT_V6 2>/dev/null || true
             ip6tables -X LABO_DOCKER_USER_V6 2>/dev/null || true
-            ip6tables -P INPUT ACCEPT
-            ip6tables -P FORWARD ACCEPT
         else
             log "INFO" "ip6tables not found, skipping v6 flush."
         fi
@@ -554,12 +604,12 @@ EOF
 #
 ###############################################################################
 
+# Apply all firewall rules using the modern nftables backend
 apply_rules_nftables() {
     log "INFO" "Applying rules using nftables (native) backend..."
 
-    # Clean up legacy iptables rules (if they exist) ---
+    # --- Clean up legacy iptables rules ---
     # This prevents conflicts if switching from iptables to nftables.
-    # We must check if iptables exists before trying to use it.
     if command -v iptables &>/dev/null; then
         log "INFO" "Cleaning up legacy iptables rules..."
         iptables -D INPUT -j LABO_INPUT 2>/dev/null || true
@@ -569,7 +619,6 @@ apply_rules_nftables() {
         iptables -X LABO_INPUT 2>/dev/null || true
         iptables -X LABO_DOCKER_USER 2>/dev/null || true
     fi
-
     if command -v ip6tables &>/dev/null; then
         log "INFO" "Cleaning up legacy ip6tables rules..."
         ip6tables -D INPUT -j LABO_INPUT_V6 2>/dev/null || true
@@ -580,11 +629,13 @@ apply_rules_nftables() {
         ip6tables -X LABO_DOCKER_USER_V6 2>/dev/null || true
     fi
 
+    # --- Prepare sets ---
     local nft_set_elements_v4
+    # Read the file, replace newlines with commas, remove trailing comma
     nft_set_elements_v4=$(<"$IP_RANGE_FILE_V4" tr '\n' ',' | sed 's/,$//')
     if [[ -z "$nft_set_elements_v4" ]]; then
-        log "WARN" "IPv4 range file is empty. Using dummy IP."
-        nft_set_elements_v4="192.0.2.1"
+        log "WARN" "IPv4 range file is empty. Using dummy IP to prevent nft error."
+        nft_set_elements_v4="192.0.2.1" # RFC 5737 TEST-NET-1
     fi
 
     local nft_set_elements_v6=""
@@ -592,47 +643,58 @@ apply_rules_nftables() {
         nft_set_elements_v6=$(<"$IP_RANGE_FILE_V6" tr '\n' ',' | sed 's/,$//')
     fi
     if [[ "$GEOBLOCK_IPV6" == true && -z "$nft_set_elements_v6" ]]; then
-        log "WARN" "IPv6 range file is empty. Using dummy IP."
-        nft_set_elements_v6="::ffff:192.0.2.1"
+        log "WARN" "IPv6 range file is empty. Using dummy IP to prevent nft error."
+        nft_set_elements_v6="2001:db8::1" # RFC 3849 documentation prefix
     fi
 
+    # --- Generate atomic ruleset ---
     log "INFO" "Generating atomic nftables ruleset..."
     log "INFO" "Flushing existing $NFT_TABLE_NAME table..."
     nft delete table inet $NFT_TABLE_NAME 2>/dev/null || true
 
     # We pipe the ruleset directly to 'nft -f -'
+    # This applies the entire configuration atomatically.
     cat <<-EOF | nft -f -
         table inet $NFT_TABLE_NAME {
 
             # ========= SETS =========
+            # These sets contain our whitelisted IPs.
 
             set private_nets_v4 {
                 type ipv4_addr
                 flags interval
                 elements = { 10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16 }
             }
-
             set private_nets_v6 {
                 type ipv6_addr
                 flags interval
                 elements = { fc00::/7, fe80::/10 }
             }
-
             set $ALLOW_LIST_NAME_V4 {
                 type ipv4_addr
                 flags interval
                 elements = { $nft_set_elements_v4 }
             }
 
-            set ssh_ratelimit {
+            # Dynamic sets for SSH brute-force (v4 + v6)
+            set ssh_ratelimit_v4 {
                 type ipv4_addr
                 flags dynamic ; timeout 10s ; size 65536 ;
             }
-            set ssh_blacklist {
+            set ssh_blacklist_v4 {
                 type ipv4_addr
                 flags dynamic ; timeout 5m ; size 65536 ;
             }
+            set ssh_ratelimit_v6 {
+                type ipv6_addr
+                flags dynamic ; timeout 10s ; size 65536 ;
+            }
+            set ssh_blacklist_v6 {
+                type ipv6_addr
+                flags dynamic ; timeout 5m ; size 65536 ;
+            }
 
+            # Conditionally create the IPv6 set only if enabled
             $(if [[ "$GEOBLOCK_IPV6" == true ]]; then
                 echo "
                 set $ALLOW_LIST_NAME_V6 {
@@ -645,36 +707,86 @@ apply_rules_nftables() {
 
             # ========= CHAINS =========
 
+            # --- INPUT Chain (Default Drop) ---
+            # Handles traffic *to* this server.
+            # We use "policy drop" for maximum security.
             chain INPUT {
-                type filter hook input priority -10; policy accept;
+                type filter hook input priority -10; policy drop;
+                
+                # 1. Allow loopback
                 iifname "lo" accept
+                
+                # 2. Allow established connections
                 ct state related,established accept
+                
+                # 3. Drop invalid packets
                 ct state invalid counter drop
+                
+                # 4. CRITICAL: Allow all ICMPv6 for IPv6 stack to function
+                # This includes Router Advertisements, Neighbor Discovery, etc.
+                ip6 nexthdr icmpv6 accept
+                # Allow ICMPv4 (ping, etc)
+                ip protocol icmp accept
+                
+                # 5. Allow private network traffic
                 ip saddr @private_nets_v4 accept
                 ip6 saddr @private_nets_v6 accept
-                ip saddr @ssh_blacklist counter log prefix "INPUT SSH BL-DROP: " drop
+                
+                # 6. SSH Brute Force Mitigation (v4)
+                ip saddr @ssh_blacklist_v4 counter log prefix "INPUT SSH BL-DROP: " drop
                 tcp dport $SSH_PORT ct state new \
-                    add @ssh_ratelimit { ip saddr limit rate over 10/second } \
-                    add @ssh_blacklist { ip saddr } \
+                    add @ssh_ratelimit_v4 { ip saddr limit rate over 10/second } \
+                    add @ssh_blacklist_v4 { ip saddr } \
                     counter log prefix "INPUT SSH RATE-DROP: " drop
-                ip saddr != @$ALLOW_LIST_NAME_V4 counter log prefix "INPUT GEO-DROP: " drop
+                
+                # 7. SSH Brute Force Mitigation (v6)
+                ip6 saddr @ssh_blacklist_v6 counter log prefix "INPUT6 SSH BL-DROP: " drop
+                tcp dport $SSH_PORT ct state new \
+                    add @ssh_ratelimit_v6 { ip6 saddr limit rate over 10/second } \
+                    add @ssh_blacklist_v6 { ip6 saddr } \
+                    counter log prefix "INPUT6 SSH RATE-DROP: " drop
 
+                # 8. Allow SSH *only* from our Geo-IP list
+                tcp dport $SSH_PORT ip saddr @$ALLOW_LIST_NAME_V4 accept
+                
                 $(if [[ "$GEOBLOCK_IPV6" == true ]]; then
-                    echo "ip6 saddr != @$ALLOW_LIST_NAME_V6 counter log prefix \"INPUT6 GEO-DROP: \" drop"
+                    # If v6 Geo-blocking is ON, allow SSH only from v6 allowlist
+                    echo "tcp dport $SSH_PORT ip6 saddr @$ALLOW_LIST_NAME_V6 accept"
+                else
+                    # If v6 Geo-blocking is OFF, allow SSH from any v6
+                    echo "tcp dport $SSH_PORT ip6 nexthdr tcp accept"
                 fi)
+                
+                # 9. (Implicit) All other traffic is dropped by "policy drop"
             }
 
+            # --- FORWARD Chain (Default Accept) ---
+            # Handles traffic *through* this server (i.e., Docker)
+            # We use "policy accept" to not interfere with Docker's rules.
             chain DOCKER_PRE {
                 type filter hook forward priority -10; policy accept;
+                
+                # 1. Allow established connections
                 ct state related,established accept
+                
+                # 2. Drop invalid packets
                 ct state invalid counter drop
+                
+                # 3. Allow private network traffic
                 ip saddr @private_nets_v4 accept
                 ip6 saddr @private_nets_v6 accept
+                
+                # 4. Geo-IP Filtering (IPv4)
+                # Drop traffic NOT in our allowlist
                 ip saddr != @$ALLOW_LIST_NAME_V4 counter log prefix "DOCKER GEO-DROP: " drop
 
+                # 5. Geo-IP Filtering (IPv6, if enabled)
                 $(if [[ "$GEOBLOCK_IPV6" == true ]]; then
                     echo "ip6 saddr != @$ALLOW_LIST_NAME_V6 counter log prefix \"DOCKER6 GEO-DROP: \" drop"
                 fi)
+                
+                # 6. (Implicit) All other traffic is accepted and passed
+                #    to Docker's own chains (at priority 0).
             }
         }
 EOF
@@ -685,14 +797,18 @@ EOF
 # Main Logic
 ###################
 main() {
-    # 1. Check root & setup traps
-    check_root
-    # 2. Parse -c, -b, -G, -s flags
+    # 1. Check root, create secure temp dir, and setup traps
+    setup_temp_dir_and_traps
+    
+    # 2. Parse -c, -p, -b, -G, -s flags
     parse_arguments "$@"
-    # 3. Check internet
+    
+    # 3. Check internet (fail-fast)
     check_connectivity
+    
     # 4. Detect nftables vs iptables (must be *after* parse_arguments)
     detect_backend
+    
     # 5. Check if required commands are installed
     check_installed_commands
 
@@ -703,6 +819,8 @@ main() {
     $USE_BLOCKLIST && download_blocklists
 
     # 8. Download country lists and generate final v4/v6 range files
+    # This step is critical. It calls the retry_command, and
+    # generate_ip_list() itself will 'die' if the final list is empty.
     generate_ip_list
 
     # 9. Dispatch to the correct firewall function
