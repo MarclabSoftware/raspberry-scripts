@@ -220,8 +220,8 @@ parse_arguments() {
         die "SSH port must be a number between 1 and 65535"
     fi
     # Validate country codes
-    if [[ ! "$ALLOWED_COUNTRIES" =~ ^[A-Z,]+$ ]]; then
-        die "Country codes must be uppercase and comma-separated (e.g., IT,FR,DE)"
+    if [[ ! "$ALLOWED_COUNTRIES" =~ ^[A-Za-z,]+$ ]]; then
+        die "Country codes must be letters and comma-separated (e.g., IT,fr,DE)"
     fi
     # Validate provider using a robust glob match
     if ! [[ " $ALLOWED_PROVIDERS " == *"$GEO_IP_PROVIDER"* ]]; then
@@ -380,9 +380,19 @@ generate_ip_list() {
     if [[ "$GEOBLOCK_IPV6" == true ]]; then
         log "INFO" "Combining IPv6 allow lists..."
 
-        # Use a glob that finds all .v6 files.
-        # We use 'cat' as a simple combiner.
-        cat "$ALLOW_LIST_DIR"/*.v6 > "$IP_RANGE_FILE_V6" 2>/dev/null || true
+        # Use nullglob to safely handle cases where no .v6 files exist.
+        # This prevents 'cat' from hanging on a literal glob string.
+        shopt -s nullglob
+        local v6_files=("$ALLOW_LIST_DIR"/*.v6)
+        shopt -u nullglob
+
+        if [[ ${#v6_files[@]} -gt 0 ]]; then
+            # Concatenate all found .v6 files
+            cat "${v6_files[@]}" > "$IP_RANGE_FILE_V6"
+        else
+            # No files found, create an empty file
+            true > "$IP_RANGE_FILE_V6"
+        fi
 
         if [[ ! -s "$IP_RANGE_FILE_V6" ]]; then
              log "WARN" "IPv6 range file $IP_RANGE_FILE_V6 is empty. IPv6 Geo-IP will not be active."
