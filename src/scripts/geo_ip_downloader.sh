@@ -3,15 +3,29 @@
 ###############################################################################
 # Universal Geo-IP List Downloader
 #
+# Backend utility for 'ip-blocker.sh'. Downloads, parses, and validates
+# Geo-IP lists from multiple providers (ipdeny, ripe, nirsoft) using an
+# advanced, per-provider country specification syntax.
+#
+# Core Features:
+# - Multi-Provider: Supports 'ipdeny', 'ripe' (DB parsing), & 'nirsoft' (CSV).
+# - Advanced Syntax: Accepts provider-specific country lists (e.g., 'ripe:IT;ipdeny:CN').
+# - Parallel & Safe: Runs concurrent downloads and validates all lists to
+#   remove empty or unsafe entries (e.g., 0.0.0.0/0).
+# - Normalized Output: Generates standardized '.list.v4' and '.list.v6' files
+#   ready for consumption by 'ip-blocker.sh'.
+#
+# Usage:
+#   ./geo_ip_downloader.sh -c SYNTAX [-h]
+#
+# Options:
+#   -c syntax   Provider/country list [Mandatory].
+#               Example: 'ripe:IT,FR;ipdeny:CN,KR;nirsoft:DE'
+#   -h          Display this help message.
+#
 # Author: LaboDJ
-# Version: 6.2
+# Version: 6.3
 # Last Updated: 2025/11/15
-#
-# This script downloads, parses, and validates Geo-IP lists from various
-# providers (ipdeny, ripe, nirsoft) for specified countries. It is designed
-# to be called by the main 'ip-blocker.sh' script and generates normalized
-# .list.v4 and .list.v6 files.
-#
 ###############################################################################
 
 # Enable strict mode
@@ -31,20 +45,18 @@ SCRIPT_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" &>/dev/null && pwd)
 readonly SCRIPT_DIR
 # Define the output directory for allowed lists
 readonly ALLOW_DIR="$SCRIPT_DIR/lists/allow"
-# Default provider if none is specified
-readonly DEFAULT_PROVIDER="ipdeny"
 # Required commands for dependency checks
 readonly REQUIRED_COMMANDS=(curl grep sed tr awk md5sum cut)
 # Max concurrent download jobs for parallel processing
 readonly MAX_DOWNLOAD_JOBS=4
+# Allowed provider keys
+readonly ALLOWED_PROVIDERS="ipdeny ripe nirsoft"
 
 ###################
 # Global Variables
 ###################
 
-declare ALLOWED_COUNTRIES=""
-declare PROVIDER="$DEFAULT_PROVIDER"
-declare -a COUNTRY_ARRAY=()
+declare ALLOWED_COUNTRIES_SYNTAX="" # e.g., "ripe:IT,FR;ipdeny:CN"
 declare TEMP_DIR="" # Used for RIPE/Nirsoft downloads
 
 ###################
@@ -106,31 +118,31 @@ cleanup() {
 print_usage() {
     cat <<EOF
 
-Usage: $0 -c COUNTRIES [-p PROVIDER] [-h]
+Usage: $0 -c PROVIDER:COUNTRIES_LIST[;PROVIDER2:LIST2...] [-h]
 
 Options:
-    -c countries   Comma-separated list of country codes (e.g., IT,DE,FR) [Mandatory]
-    -p provider    Data provider: 'ipdeny', 'ripe', 'nirsoft'. (Default: $DEFAULT_PROVIDER)
-    -h             Display this help message
+    -c syntax   Provider and country list. [Mandatory]
+                Example: 'ripe:IT,FR;ipdeny:CN,KR;nirsoft:DE'
+                Simple form: 'ipdeny:US'
+    -h          Display this help message
 EOF
     exit 1
 }
 
 # Parses command-line options using getopts.
 parse_arguments() {
-    while getopts ":c:p:h" opt; do
+    while getopts ":c:h" opt; do
         case $opt in
-        c) ALLOWED_COUNTRIES="$OPTARG" ;;
-        p) PROVIDER="$OPTARG" ;;
+        c) ALLOWED_COUNTRIES_SYNTAX="$OPTARG" ;;
         h) print_usage ;;
         \?) log "ERROR" "Invalid option: -$OPTARG"; print_usage ;;
         :) log "ERROR" "The option -$OPTARG requires an argument"; print_usage ;;
         esac
     done
-    
+
     # The -c (countries) option is non-negotiable.
-    if [[ -z "$ALLOWED_COUNTRIES" ]]; then
-        log "ERROR" "Country list (-c) is mandatory."
+    if [[ -z "$ALLOWED_COUNTRIES_SYNTAX" ]]; then
+        log "ERROR" "Country/Provider syntax (-c) is mandatory."
         print_usage
     fi
 }
@@ -145,13 +157,13 @@ check_dependencies() {
     for cmd in "${REQUIRED_COMMANDS[@]}"; do
         command -v "$cmd" >/dev/null 2>&1 || missing_commands+=("$cmd")
     done
-    
+
     # Specifically check if awk has the log() function, which is
     # required for the RIPE provider's CIDR calculation.
     if ! awk 'BEGIN { exit !(log(8)/log(2) == 3) }' 2>/dev/null; then
          missing_commands+=("awk (with 'log' function support)")
     fi
-    
+
     [[ ${#missing_commands[@]} -eq 0 ]] || die "Missing commands/features: ${missing_commands[*]}"
 }
 
@@ -208,7 +220,6 @@ export -f validate_and_move_generated_file
 
 
 # A wrapper function that downloads, cleans, and validates a simple list.
-# Used by providers like ipdeny.
 # @param $1 The URL to download
 # @param $2 The final output file path
 # @param $3 A human-readable name for logging
@@ -222,7 +233,6 @@ download_and_validate_simple() {
 
     if ! download_file "$url" "$temp_outfile"; then
         log "WARN" "Failed to download $proto_name list. Skipping."
-        # We no longer 'touch' an empty file. Failure means no file.
         return
     fi
 
@@ -258,27 +268,28 @@ _download_country_ipdeny() {
     code_lower=$(echo "$code" | tr '[:upper:]' '[:lower:]')
 
     local V4_URL="https://www.ipdeny.com/ipblocks/data/aggregated/$code_lower-aggregated.zone"
-    local V4_OUT_FILE="$ALLOW_DIR/$code_lower.list.v4"
+    local V4_OUT_FILE="$ALLOW_DIR/$code_lower.ipdeny.list.v4"
     download_and_validate_simple "$V4_URL" "$V4_OUT_FILE" "IPv4 ($code)"
 
     local V6_URL="https://www.ipdeny.com/ipv6/ipaddresses/aggregated/$code_lower-aggregated.zone"
-    local V6_OUT_FILE="$ALLOW_DIR/$code_lower.list.v6"
+    local V6_OUT_FILE="$ALLOW_DIR/$code_lower.ipdeny.list.v6"
     download_and_validate_simple "$V6_URL" "$V6_OUT_FILE" "IPv6 ($code)"
 }
 export -f _download_country_ipdeny
 
 # Main function for the 'ipdeny' provider.
-# Downloads all specified countries in parallel.
+# @param $@ A list of country codes (e.g., "IT" "FR" "DE")
 download_provider_ipdeny() {
-    log "INFO" "Using provider: ipdeny (Parallel Mode)"
-    for code in "${COUNTRY_ARRAY[@]}"; do
+    local -a countries=("$@")
+    log "INFO" "Using provider: ipdeny (Parallel Mode) for ${countries[*]}"
+    for code in "${countries[@]}"; do
         wait_for_job_slot
         # Launch the download in the background
         _download_country_ipdeny "$code" &
     done
-    # Wait for all background jobs to complete
+    # Wait for all background jobs for this provider to complete
     wait
-    log "INFO" "ipdeny parallel download complete."
+    log "INFO" "ipdeny download complete for ${countries[*]}"
 }
 
 ###################
@@ -286,58 +297,70 @@ download_provider_ipdeny() {
 ###################
 
 # Main function for the 'RIPE' provider.
-# This function is monolithic because it downloads one giant database
-# file and then parses it locally for all specified countries.
+# @param $@ A list of country codes (e.g., "IT" "FR" "DE")
 download_provider_ripe() {
+    local -a ripe_countries=("$@")
+    if [[ ${#ripe_countries[@]} -eq 0 ]]; then
+        log "WARN" "RIPE provider specified but no countries listed. Skipping."
+        return
+    fi
+
     local -r RIPE_URL="https://ftp.ripe.net/pub/stats/ripencc"
     local -r RIPE_FILE="delegated-ripencc-latest"
-    TEMP_DIR=$(mktemp -d) || die "Failed to create temp dir for RIPE"
+    # Create a *shared* temp dir for RIPE.
+    if [[ -z "$TEMP_DIR" ]]; then
+        TEMP_DIR=$(mktemp -d) || die "Failed to create temp dir for RIPE"
+    fi
     local ripe_data_file="$TEMP_DIR/$RIPE_FILE"
     local ripe_md5_file="$TEMP_DIR/$RIPE_FILE.md5"
-    
-    log "INFO" "Using provider: RIPE (Supports IPv4 and IPv6)"
-    
-    # 1. Download the database and its checksum
-    log "INFO" "Downloading RIPE data file..."
-    if ! download_file "$RIPE_URL/$RIPE_FILE" "$ripe_data_file"; then
-        die "Failed to download RIPE data file"
-    fi
-    log "INFO" "Downloading RIPE MD5 file..."
-    if ! download_file "$RIPE_URL/$RIPE_FILE.md5" "$ripe_md5_file"; then
-        die "Failed to download RIPE MD5 file"
-    fi
 
-    # 2. Verify checksum
-    log "INFO" "Verifying RIPE file checksum..."
-    local expected_md5
-    expected_md5=$(awk '/MD5/ {print $NF}' "$ripe_md5_file") || die "Failed to read MD5"
-    local computed_md5
-    computed_md5=$(md5sum "$ripe_data_file" | cut -d' ' -f1)
-    if [[ "$expected_md5" != "$computed_md5" ]]; then
-        die "RIPE MD5 checksum mismatch! File is corrupt or tampered with."
+    log "INFO" "Using provider: RIPE (Supports IPv4 and IPv6) for ${ripe_countries[*]}"
+
+    # 1. Download the database and its checksum (only if not already downloaded)
+    if [[ ! -f "$ripe_data_file" ]]; then
+        log "INFO" "Downloading RIPE data file..."
+        if ! download_file "$RIPE_URL/$RIPE_FILE" "$ripe_data_file"; then
+            die "Failed to download RIPE data file"
+        fi
+        log "INFO" "Downloading RIPE MD5 file..."
+        if ! download_file "$RIPE_URL/$RIPE_FILE.md5" "$ripe_md5_file"; then
+            die "Failed to download RIPE MD5 file"
+        fi
+
+        # 2. Verify checksum
+        log "INFO" "Verifying RIPE file checksum..."
+        local expected_md5
+        expected_md5=$(awk '/MD5/ {print $NF}' "$ripe_md5_file") || die "Failed to read MD5"
+        local computed_md5
+        computed_md5=$(md5sum "$ripe_data_file" | cut -d' ' -f1)
+        if [[ "$expected_md5" != "$computed_md5" ]]; then
+            die "RIPE MD5 checksum mismatch! File is corrupt or tampered with."
+        fi
+        log "INFO" "Checksum OK."
+    else
+        log "INFO" "Using cached RIPE data file."
     fi
-    log "INFO" "Checksum OK."
 
     # 3. Parse the database for each country
-    log "INFO" "Parsing RIPE data for all countries (this may take a moment)..."
-    for code in "${COUNTRY_ARRAY[@]}"; do
+    log "INFO" "Parsing RIPE data for ${ripe_countries[*]} (this may take a moment)..."
+    for code in "${ripe_countries[@]}"; do
         local code_lower
         code_lower=$(echo "$code" | tr '[:upper:]' '[:lower:]')
-        local V4_OUT_FILE="$ALLOW_DIR/$code_lower.list.v4"
-        local V6_OUT_FILE="$ALLOW_DIR/$code_lower.list.v6"
+        local V4_OUT_FILE="$ALLOW_DIR/$code_lower.ripe.list.v4"
+        local V6_OUT_FILE="$ALLOW_DIR/$code_lower.ripe.list.v6"
         local TEMP_V4_OUT_FILE="$V4_OUT_FILE.tmp"
         local TEMP_V6_OUT_FILE="$V6_OUT_FILE.tmp"
-        
+
         log "INFO" "Processing RIPE data for $code..."
         # Ensure temp files are empty
         true > "$TEMP_V4_OUT_FILE"
         true > "$TEMP_V6_OUT_FILE"
-        
+
         # Pass file paths and country code to awk via environment variables
         export AWK_V4_FILE="$TEMP_V4_OUT_FILE"
         export AWK_V6_FILE="$TEMP_V6_OUT_FILE"
-        export AWK_COUNTRY="$code" 
-        
+        export AWK_COUNTRY="$code"
+
         # This awk script filters the RIPE db for the target country
         # and calculates CIDR notation for IPv4 ranges.
         awk '
@@ -347,13 +370,13 @@ download_provider_ripe() {
                 TARGET_COUNTRY = ENVIRON["AWK_COUNTRY"]
                 FS = "|"
             }
-            
+
             # Calculates CIDR mask from a host count
             function calculate_v4_cidr(hosts) {
                 if (hosts == 0) return 32
                 return 32 - (log(hosts)/log(2))
             }
-            
+
             # File format: ...|COUNTRY_CODE|TYPE|START_IP|HOST_COUNT|...|STATUS
             ($2 == TARGET_COUNTRY && $7 == "allocated") {
                 if ($3 == "ipv4") {
@@ -365,9 +388,9 @@ download_provider_ripe() {
                 }
             }
         ' "$ripe_data_file"
-        
+
         unset AWK_V4_FILE AWK_V6_FILE AWK_COUNTRY
-        
+
         # 4. Validate the resulting files
         validate_and_move_generated_file "$TEMP_V4_OUT_FILE" "$V4_OUT_FILE" "IPv4 ($code, RIPE)"
         validate_and_move_generated_file "$TEMP_V6_OUT_FILE" "$V6_OUT_FILE" "IPv6 ($code, RIPE)"
@@ -378,24 +401,26 @@ download_provider_ripe() {
 ###################
 
 # Downloads and parses an IPv4 list for a single country from nirsoft.net.
-# Nirsoft provides CSV data that must be converted. It does not provide IPv6 data.
 # @param $1 The 2-letter uppercase country code (e.g., IT)
 _download_country_nirsoft() {
     local code="$1"
     local code_lower
     code_lower=$(echo "$code" | tr '[:upper:]' '[:lower:]')
-    local V4_OUT_FILE="$ALLOW_DIR/$code_lower.list.v4"
-    local V6_OUT_FILE="$ALLOW_DIR/$code_lower.list.v6"
+    local V4_OUT_FILE="$ALLOW_DIR/$code_lower.nirsoft.list.v4"
+    local V6_OUT_FILE="$ALLOW_DIR/$code_lower.nirsoft.list.v6"
     local TEMP_V4_OUT_FILE="$V4_OUT_FILE.tmp"
     local list_name="IPv4 ($code, Nirsoft)"
     local URL="https://www.nirsoft.net/countryip/$code_lower.csv"
     local temp_csv_file
-    
+
     # We need a temp dir to store the downloaded CSV
+    if [[ -z "$TEMP_DIR" ]]; then
+        TEMP_DIR=$(mktemp -d) || die "Failed to create temp dir for Nirsoft"
+    fi
     temp_csv_file=$(mktemp --tmpdir="$TEMP_DIR") || die "Failed to create temp file"
 
     log "INFO" "Downloading $list_name CSV from $URL"
-    
+
     if ! download_file "$URL" "$temp_csv_file"; then
         log "WARN" "Failed to download Nirsoft CSV for $code. Skipping."
         rm -f "$temp_csv_file"
@@ -408,24 +433,24 @@ _download_country_nirsoft() {
     rm -f "$temp_csv_file" # Clean up downloaded CSV
 
     validate_and_move_generated_file "$TEMP_V4_OUT_FILE" "$V4_OUT_FILE" "$list_name"
-    
+
     # Nirsoft provides no IPv6 data.
     # We create an empty v6 file so 'ip-blocker.sh' can find it.
-    touch "$V6_OUT_FILE" 
+    touch "$V6_OUT_FILE"
 }
 export -f _download_country_nirsoft
 
 # Main function for the 'nirsoft' provider.
-# Downloads all specified countries in parallel.
+# @param $@ A list of country codes (e.g., "IT" "FR" "DE")
 download_provider_nirsoft() {
-    TEMP_DIR=$(mktemp -d) || die "Failed to create temp dir for Nirsoft"
-    log "INFO" "Using provider: Nirsoft (Parallel Mode, IPv4 only)"
-    for code in "${COUNTRY_ARRAY[@]}"; do
+    local -a countries=("$@")
+    log "INFO" "Using provider: Nirsoft (Parallel Mode, IPv4 only) for ${countries[*]}"
+    for code in "${countries[@]}"; do
         wait_for_job_slot
         _download_country_nirsoft "$code" &
     done
     wait
-    log "INFO" "Nirsoft parallel download complete."
+    log "INFO" "Nirsoft parallel download complete for ${countries[*]}"
 }
 
 ###################
@@ -437,7 +462,7 @@ main() {
     # 1. Setup traps and parse arguments
     setup_signal_handlers
     parse_arguments "$@"
-    
+
     # 2. Check for all required tools
     check_dependencies
 
@@ -449,54 +474,82 @@ main() {
     rm -f "$ALLOW_DIR"/*.list.v4
     rm -f "$ALLOW_DIR"/*.list.v6
 
-    # 5. Sanitize the user-provided country list
-    log "INFO" "Sanitizing country list: $ALLOWED_COUNTRIES"
-    
-    # Sanitize the input:
-    # 1. Convert to uppercase
-    # 2. Remove all whitespace (handles "IT, FR")
-    # 3. Convert commas to newlines for safe looping
-    local sanitized_list
-    sanitized_list=$(echo "$ALLOWED_COUNTRIES" | tr '[:lower:]' '[:upper:]' | tr -d '[:space:]' | tr ',' '\n')
+    # 5. Parse the new syntax
+    log "INFO" "Parsing provider/country syntax: $ALLOWED_COUNTRIES_SYNTAX"
 
-    COUNTRY_ARRAY=()
-    # Read the sanitized list line by line
-    while IFS= read -r code; do
-        # Only add non-empty lines (handles "IT,,FR")
-        if [[ -n "$code" ]]; then
-            COUNTRY_ARRAY+=("$code")
+    # Use an associative array to map providers to their country lists
+    declare -A provider_country_map
+
+    # Convert semicolons to newlines for safe looping
+    local provider_groups
+    provider_groups=$(echo "$ALLOWED_COUNTRIES_SYNTAX" | tr ';' '\n')
+
+    while IFS= read -r group; do
+        [[ -n "$group" ]] || continue # Skip empty lines
+
+        # Split "provider:C1,C2"
+        local provider_name
+        local country_list_csv
+        provider_name=$(echo "$group" | cut -d':' -f1 | tr '[:upper:]' '[:lower:]' | tr -d '[:space:]')
+        country_list_csv=$(echo "$group" | cut -d':' -f2-) # Get everything after the first colon
+
+        # Validate provider
+        if ! [[ " $ALLOWED_PROVIDERS " == *" $provider_name "* ]]; then
+            die "Invalid provider '$provider_name' in syntax. Allowed: $ALLOWED_PROVIDERS"
         fi
-    done <<< "$sanitized_list" # Feed the sanitized list into the loop
 
-    log "INFO" "Processing countries: ${COUNTRY_ARRAY[*]}"
-    [[ ${#COUNTRY_ARRAY[@]} -gt 0 ]] || die "No valid country codes provided after sanitization."
+        # Sanitize country list: uppercase, remove spaces, convert comma to space
+        local sanitized_countries
+        sanitized_countries=$(echo "$country_list_csv" | tr '[:lower:]' '[:upper:]' | tr -d '[:space:]' | tr ',' ' ')
 
-    # 6. Dispatch to the correct provider function
-    case "$PROVIDER" in
-    "ipdeny")
-        download_provider_ipdeny
-        ;;
-    "ripe")
-        download_provider_ripe
-        ;;
-    "nirsoft")
-        download_provider_nirsoft
-        ;;
-    *)
-        die "Unknown or unsupported provider: '$PROVIDER'"
-        ;;
-    esac
+        # Append to the map (handles a provider being listed multiple times)
+        provider_country_map[$provider_name]+="$sanitized_countries "
+
+    done <<< "$provider_groups"
+
+    # 6. Dispatch to the correct provider functions
+    for provider in "${!provider_country_map[@]}"; do
+        # Create a clean array of unique country codes for this provider
+        local -a country_array
+        # Use 'tr' to convert spaces to newlines, 'sort -u' for uniqueness,
+        # and 'read' to build the final array.
+        mapfile -t country_array < <(echo "${provider_country_map[$provider]}" | tr ' ' '\n' | grep . | sort -u)
+
+        [[ ${#country_array[@]} -gt 0 ]] || continue # Skip if no countries
+
+        log "INFO" "Dispatching download for provider: $provider (Countries: ${country_array[*]})"
+
+        case "$provider" in
+        "ipdeny")
+            # Pass the country array to the function
+            download_provider_ipdeny "${country_array[@]}"
+            ;;
+        "ripe")
+            # RIPE is monolithic; it must run sequentially in the main thread.
+            # Pass the country array to the function.
+            download_provider_ripe "${country_array[@]}"
+            ;;
+        "nirsoft")
+            # Pass the country array to the function
+            download_provider_nirsoft "${country_array[@]}"
+            ;;
+        *)
+            # This should be unreachable due to validation above
+            die "Unknown or unsupported provider: '$provider'"
+            ;;
+        esac
+    done
 
     # 7. Final Validation
     # This is a critical safety net. If *all* downloads failed
     # (e.g., provider is down, no internet), we must abort.
     log "INFO" "Final check for generated lists..."
-    
+
     # 'find' is safer than 'ls' for this.
     # We just need to know if *at least one* file was created.
     local file_count
     file_count=$(find "$ALLOW_DIR" -maxdepth 1 \( -name "*.list.v4" -o -name "*.list.v6" \) -print 2>/dev/null | wc -l)
-    
+
     if [[ $file_count -eq 0 ]]; then
         die "DOWNLOAD FAILED. No Geo-IP lists were generated (provider unreachable?). Aborting to preserve existing firewall rules."
     fi
