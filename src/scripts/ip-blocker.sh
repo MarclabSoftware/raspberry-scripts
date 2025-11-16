@@ -501,34 +501,33 @@ apply_rules_iptables() {
 :LABO_INPUT - [0:0]
 :LABO_DOCKER_USER - [0:0]
 
-# --- LABO_INPUT Chain (Default Deny for Host) ---
+# --- LABO_INPUT Chain (Host Protection) ---
+# Base rules: allow traffic that is always safe
 -A LABO_INPUT -m state --state INVALID -j DROP
 -A LABO_INPUT -i lo -j ACCEPT
 -A LABO_INPUT -s 10.0.0.0/8 -j ACCEPT
 -A LABO_INPUT -s 172.16.0.0/12 -j ACCEPT
 -A LABO_INPUT -s 192.168.0.0/16 -j ACCEPT
 -A LABO_INPUT -m state --state RELATED,ESTABLISHED -j ACCEPT
+# Drop traffic NOT from our Geo-IP list.
+# This applies only to NEW, non-private traffic.
+-A LABO_INPUT -m set ! --match-set $ALLOW_LIST_NAME_V4 src -j LOG_AND_DROP_INPUT
 -A LABO_INPUT -p icmp -j ACCEPT
 # SSH Brute Force Mitigation (IPv4)
 -A LABO_INPUT -p tcp --dport $SSH_PORT -m state --state NEW -m recent --set --name SSH --rsource
 -A LABO_INPUT -p tcp --dport $SSH_PORT -m state --state NEW -m recent --update --seconds 10 --hitcount 10 --name SSH --rsource -j LOG --log-prefix "SSH BRUTE DROP: "
 -A LABO_INPUT -p tcp --dport $SSH_PORT -m state --state NEW -m recent --update --seconds 10 --hitcount 10 --name SSH --rsource -j DROP
-# Allow SSH only from Geo-IP list
--A LABO_INPUT -p tcp --dport $SSH_PORT -m set --match-set $ALLOW_LIST_NAME_V4 src -j ACCEPT
-# Log and Drop non-allowlisted Geo-IP traffic
--A LABO_INPUT -m set ! --match-set $ALLOW_LIST_NAME_V4 src -j LOG_AND_DROP_INPUT
-# Default Deny: Drop all other traffic to host
--A LABO_INPUT -j LOG --log-level 4 --log-prefix "INPUT DEFAULT DROP: "
--A LABO_INPUT -j DROP
+-A LABO_INPUT -j ACCEPT
 
-# --- LABO_DOCKER_USER Chain (Default Allow for Docker) ---
+# --- LABO_DOCKER_USER Chain (Forwarded Traffic Protection) ---
+# This chain's logic was already correct.
 -A LABO_DOCKER_USER -m state --state INVALID -j DROP
 -A LABO_DOCKER_USER -i lo -j RETURN
 -A LABO_DOCKER_USER -s 10.0.0.0/8 -j RETURN
 -A LABO_DOCKER_USER -s 172.16.0.0/12 -j RETURN
 -A LABO_DOCKER_USER -s 192.168.0.0/16 -j RETURN
 -A LABO_DOCKER_USER -m state --state RELATED,ESTABLISHED -j RETURN
-# Geo-IP Filter: Drop traffic not in our allowlist
+# Geo-IP Filter: Drop NEW traffic not in our allowlist
 -A LABO_DOCKER_USER -m set ! --match-set $ALLOW_LIST_NAME_V4 src -j LOG_AND_DROP_DOCKER
 # Default Allow: Return to Docker's chains
 -A LABO_DOCKER_USER -j RETURN
@@ -558,25 +557,21 @@ EOF
 :LABO_INPUT_V6 - [0:0]
 :LABO_DOCKER_USER_V6 - [0:0]
 
-# --- LABO_INPUT_V6 Chain (Default Deny for Host) ---
+# --- LABO_INPUT_V6 Chain (Host Protection) ---
 -A LABO_INPUT_V6 -m state --state INVALID -j DROP
 -A LABO_INPUT_V6 -i lo -j ACCEPT
+-A LABO_INPUT_V6 -m state --state RELATED,ESTABLISHED -j ACCEPT
 -A LABO_INPUT_V6 -s fe80::/10 -j ACCEPT
 -A LABO_INPUT_V6 -s fc00::/7 -j ACCEPT
+# Log and Drop non-allowlisted Geo-IP traffic
+-A LABO_INPUT_V6 -m set ! --match-set $ALLOW_LIST_NAME_V6 src -j DROP
 -A LABO_INPUT_V6 -p icmpv6 -j ACCEPT
--A LABO_INPUT_V6 -m state --state RELATED,ESTABLISHED -j ACCEPT
 # SSH Brute Force Mitigation (IPv6, rate-limit only)
 -A LABO_INPUT_V6 -p tcp --dport $SSH_PORT -m hashlimit --hashlimit-name ssh_v6_limit --hashlimit-mode srcip --hashlimit-above 10/second -j LOG --log-prefix "IP6 SSH RATE-DROP: "
 -A LABO_INPUT_V6 -p tcp --dport $SSH_PORT -m hashlimit --hashlimit-name ssh_v6_limit --hashlimit-mode srcip --hashlimit-above 10/second -j DROP
-# Allow SSH only from Geo-IP list
--A LABO_INPUT_V6 -p tcp --dport $SSH_PORT -m set --match-set $ALLOW_LIST_NAME_V6 src -j ACCEPT
-# Log and Drop non-allowlisted Geo-IP traffic
--A LABO_INPUT_V6 -m set ! --match-set $ALLOW_LIST_NAME_V6 src -j DROP
-# Default Deny: Drop all other traffic to host
--A LABO_INPUT_V6 -j LOG --log-level 4 --log-prefix "INPUT6 DEFAULT DROP: "
--A LABO_INPUT_V6 -j DROP
+-A LABO_INPUT_V6 -j ACCEPT
 
-# --- LABO_DOCKER_USER_V6 Chain (Default Allow for Docker) ---
+# --- LABO_DOCKER_USER_V6 Chain (Forwarded Traffic Protection) ---
 -A LABO_DOCKER_USER_V6 -m state --state INVALID -j DROP
 -A LABO_DOCKER_USER_V6 -i lo -j RETURN
 -A LABO_DOCKER_USER_V6 -s fe80::/10 -j RETURN
@@ -725,94 +720,67 @@ apply_rules_nftables() {
 
             # ========= CHAINS =========
 
-            # --- INPUT Chain (Default Drop) ---
-            # Handles traffic *to* this server.
-            # We use "policy drop" for maximum security.
-            chain INPUT {
-                type filter hook input priority -10; policy drop;
+            # --- PREROUTING Chain (Main Gatekeeper) ---
+            # Filters *ALL* incoming traffic (Host + Forward) at the earliest
+            # stateful point (priority 'filter' = -150), before input/forward.
+            chain GEOIP_PREROUTING {
+                type filter hook prerouting priority filter; policy accept;
 
-                # 1. Allow loopback
+                # 1. Accept critical system/stateful traffic immediately.
                 iifname "lo" accept
-
-                # 2. Allow established connections
                 ct state related,established accept
-
-                # 3. Drop invalid packets
                 ct state invalid counter drop
 
-                # 4. CRITICAL: Allow all ICMPv6 for IPv6 stack to function
-                # This includes Router Advertisements, Neighbor Discovery, etc.
-                ip6 nexthdr icmpv6 accept
-                # Allow ICMPv4 (ping, etc)
-                ip protocol icmp accept
-
-                # 5. Allow private network traffic
+                # 2. Accept private networks (Docker, WG, LAN) to bypass Geo-IP.
                 ip saddr @private_nets_v4 accept
                 ip6 saddr @private_nets_v6 accept
 
-                # 6. Geo-IP Filtering (IPv4)
-                # Drop traffic NOT in our allowlist.
-                # This log line confirms the INPUT drop is working.
-                ip saddr != @$ALLOW_LIST_NAME_V4 counter log prefix "INPUT GEO-DROP: " drop
+                # 3. CRITICAL: Allow all ICMPv6 *before* geo-blocking.
+                #    This is required for Neighbor Discovery (NDP) to work.
+                ip6 nexthdr icmpv6 accept
 
-                # 7. Geo-IP Filtering (IPv6, if enabled)
+                # 4. Geo-IP v4 Filter (DROP)
+                #    Drop all NEW traffic that is NOT in the allowlist.
+                ip saddr != @$ALLOW_LIST_NAME_V4 counter log prefix "PREROUTING GEO-DROP: " drop
+
+                # 5. Geo-IP v6 Filter (DROP, if enabled)
                 $(if [[ "$GEOBLOCK_IPV6" == true ]]; then
-                    # If v6 Geo-blocking is ON, log and drop non-allowlisted v6
-                    echo "ip6 saddr != @$ALLOW_LIST_NAME_V6 counter log prefix \"INPUT6 GEO-DROP: \" drop"
-                else
-                    # If v6 Geo-blocking is OFF, accept all remaining v6
-                    echo "ip6 nexthdr != icmpv6 accept"
+                    # We already accepted icmpv6, so we only filter
+                    # other protocols that are NOT in the allowlist.
+                    echo "ip6 nexthdr != icmpv6 ip6 saddr != @$ALLOW_LIST_NAME_V6 counter log prefix \"PREROUTING6 GEO-DROP: \" drop"
                 fi)
 
-                # At this point, all traffic is from an allowed source.
+                # 6. (Implicit) All other traffic is ACCEPTED by the policy.
+                #    This includes:
+                #    - NEW traffic from @allowlist_v4 (for SSH, WG, ICMP, etc.)
+                #    - All IPv6 traffic (if GEOBLOCK_IPV6=false).
+            }
 
-                # 8. SSH Brute Force Mitigation (v4)
+            # --- INPUT Chain (Host Protection) ---
+            # Handles traffic *to* this server that has *already passed* PREROUTING.
+            # We use 'policy accept' because the main filter is done.
+            chain INPUT {
+                type filter hook input priority filter - 10; policy accept;
+
+                # 1. Drop invalid packets (redundant but safe).
+                ct state invalid counter drop
+
+                # 2. SSH Brute Force Mitigation (v4)
                 ip saddr @ssh_blacklist_v4 counter log prefix "INPUT SSH BL-DROP: " drop
                 tcp dport $SSH_PORT ct state new \
                     add @ssh_ratelimit_v4 { ip saddr limit rate over 10/second } \
                     add @ssh_blacklist_v4 { ip saddr } \
                     counter log prefix "INPUT SSH RATE-DROP: " drop
 
-                # 9. SSH Brute Force Mitigation (v6)
+                # 3. SSH Brute Force Mitigation (v6)
                 ip6 saddr @ssh_blacklist_v6 counter log prefix "INPUT6 SSH BL-DROP: " drop
                 tcp dport $SSH_PORT ct state new \
                     add @ssh_ratelimit_v6 { ip6 saddr limit rate over 10/second } \
                     add @ssh_blacklist_v6 { ip6 saddr } \
                     counter log prefix "INPUT6 SSH RATE-DROP: " drop
 
-                # 10. Allow SSH (now that it has passed Geo-IP and brute-force)
-                tcp dport $SSH_PORT accept
-
-                # 11. (Implicit) All other traffic is dropped by "policy drop"
-            }
-
-            # --- FORWARD Chain (Default Accept) ---
-            # Handles traffic *through* this server (i.e., Docker)
-            # We use "policy accept" to not interfere with Docker's rules.
-            chain DOCKER_PRE {
-                type filter hook forward priority -10; policy accept;
-
-                # 1. Allow established connections
-                ct state related,established accept
-
-                # 2. Drop invalid packets
-                ct state invalid counter drop
-
-                # 3. Allow private network traffic
-                ip saddr @private_nets_v4 accept
-                ip6 saddr @private_nets_v6 accept
-
-                # 4. Geo-IP Filtering (IPv4)
-                # Drop traffic NOT in our allowlist
-                ip saddr != @$ALLOW_LIST_NAME_V4 counter log prefix "DOCKER GEO-DROP: " drop
-
-                # 5. Geo-IP Filtering (IPv6, if enabled)
-                $(if [[ "$GEOBLOCK_IPV6" == true ]]; then
-                    echo "ip6 saddr != @$ALLOW_LIST_NAME_V6 counter log prefix \"DOCKER6 GEO-DROP: \" drop"
-                fi)
-
-                # 6. (Implicit) All other traffic is accepted and passed
-                #    to Docker's own chains (at priority 0).
+                # 4. (Implicit) All other host traffic (SSH, WireGuard, ICMP)
+                #    that passed PREROUTING is allowed by the 'policy accept'.
             }
         }
 EOF
