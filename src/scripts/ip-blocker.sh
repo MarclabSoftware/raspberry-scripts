@@ -722,9 +722,8 @@ apply_rules_nftables() {
 
             # --- PREROUTING Chain (Main Gatekeeper) ---
             # Filters *ALL* incoming traffic (Host + Forward) at the earliest
-            # stateful point (priority 'filter' = -150), before input/forward.
             chain GEOIP_PREROUTING {
-                type filter hook prerouting priority filter; policy accept;
+                type filter hook prerouting priority mangle -2; policy accept;
 
                 # 1. Accept critical system/stateful traffic immediately.
                 iifname "lo" accept
