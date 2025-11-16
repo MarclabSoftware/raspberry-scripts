@@ -665,9 +665,8 @@ apply_rules_nftables() {
     log "INFO" "Flushing existing $NFT_TABLE_NAME table..."
     nft delete table inet $NFT_TABLE_NAME 2>/dev/null || true
 
-    # We pipe the ruleset directly to 'nft -f -'
     # This applies the entire configuration atomatically.
-    cat <<-EOF | nft -f -
+    cat <<-EOF | nft -o -f -
         table inet $NFT_TABLE_NAME {
 
             # ========= SETS =========
