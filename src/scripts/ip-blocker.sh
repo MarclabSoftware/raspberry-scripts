@@ -17,7 +17,7 @@
 # - Robust: Includes connectivity checks, download retries, and error trapping.
 #
 # Usage:
-#   sudo ./ip-blocker.sh [-c COUNTRIES] [-p PROVIDER] [-b] [-G] [-s SSH_PORT] [-h]
+#   sudo ./ip-blocker.sh [-c COUNTRIES] [-p PROVIDER] [-b] [-G] [-s SSH_PORT] [-i INTERFACES] [-h]
 #
 # Options:
 #   -c countries   Specify allowed countries.
@@ -27,6 +27,7 @@
 #   -b             Enable (IPv4) blocklists.
 #   -G             Enable Geo-blocking for IPv6 (default: false, IPv6 is allowed).
 #   -s sshPort     Specify the SSH port (default: 22).
+#   -i interfaces  List of interfaces for Flowtable offload (e.g. "eth0 wg0").
 #   -h             Display this help message.
 #
 # Author: LaboDJ
@@ -86,6 +87,7 @@ declare USE_BLOCKLIST=false
 declare SSH_PORT=22
 declare GEOBLOCK_IPV6=false # Default: IPv6 is NOT geo-blocked
 declare GEO_IP_PROVIDER="$DEFAULT_PROVIDER"
+declare FLOWTABLE_INTERFACES=""
 
 # Secure temp directory
 declare TEMP_DIR=""
@@ -199,7 +201,7 @@ setup_temp_dir_and_traps() {
 print_usage() {
     cat <<EOF
 
-Usage: $0 [-c countries] [-p provider] [-b] [-G] [-s sshPort] [-h]
+Usage: $0 [-c countries] [-p provider] [-b] [-G] [-s sshPort] [-i interfaces] [-h]
 
 Options:
     -c countries   Specify allowed countries
@@ -209,6 +211,7 @@ Options:
     -b             Enable block lists (Applies to IPv4 only by default)
     -G             Enable Geo-blocking for IPv6 (default: false)
     -s sshPort     Specify SSH port (default: 22)
+    -i interfaces  Interfaces for Flowtable offload (e.g. "eth0 wg0")
     -h             Display this help message
 EOF
     exit 1
@@ -223,13 +226,14 @@ parse_arguments() {
     local OPTERR=1
 
     # New loop includes '-G' and '-p'
-    while getopts ":c:p:bs:hG" opt; do
+    while getopts ":c:p:bs:i:hG" opt; do
         case $opt in
         c) ALLOWED_COUNTRIES="$OPTARG" ;;
         p) GEO_IP_PROVIDER="$OPTARG" ;;
         b) USE_BLOCKLIST=true ;;
         G) GEOBLOCK_IPV6=true ;; # Set IPv6 blocking to opt-in
         s) SSH_PORT="$OPTARG" ;;
+        i) FLOWTABLE_INTERFACES="$OPTARG" ;;
         h) print_usage ;;
         \?) log "ERROR" "Invalid option: -$OPTARG"; print_usage ;;
         :) log "ERROR" "The option -$OPTARG requires an argument"; print_usage ;;
@@ -324,6 +328,39 @@ retry_command() {
     done
 
     die "Command failed after $MAX_RETRIES retries: ${command[*]}"
+}
+
+# Helper to expand interface wildcards (e.g. "eth0 br-*")
+expand_interfaces() {
+    local input_patterns="$1"
+    local -a expanded_list=()
+
+    for pattern in $input_patterns; do
+        if [[ "$pattern" == *"*"* ]]; then
+            # Expand wildcard using /sys/class/net
+            # Expand wildcard using compgen to avoid SC2206
+            local matches=()
+            if mapfile -t matches < <(compgen -G "/sys/class/net/$pattern"); then
+                : # Matches found
+            fi
+
+            for match in "${matches[@]}"; do
+                expanded_list+=("$(basename "$match")")
+            done
+        else
+            # Literal interface
+            if [[ -d "/sys/class/net/$pattern" ]]; then
+                expanded_list+=("$pattern")
+            else
+                log "WARN" "Interface '$pattern' not found, skipping."
+            fi
+        fi
+    done
+
+    # Deduplicate and join with commas
+    if [[ ${#expanded_list[@]} -gt 0 ]]; then
+        printf "%s\n" "${expanded_list[@]}" | sort -u | tr '\n' ',' | sed 's/,$//'
+    fi
 }
 
 ###################
@@ -536,10 +573,10 @@ apply_rules_iptables() {
 # Base rules: allow traffic that is always safe
 -A LABO_INPUT -m state --state INVALID -j DROP
 -A LABO_INPUT -i lo -j ACCEPT
+-A LABO_INPUT -m state --state RELATED,ESTABLISHED -j ACCEPT
 -A LABO_INPUT -s 10.0.0.0/8 -j ACCEPT
 -A LABO_INPUT -s 172.16.0.0/12 -j ACCEPT
 -A LABO_INPUT -s 192.168.0.0/16 -j ACCEPT
--A LABO_INPUT -m state --state RELATED,ESTABLISHED -j ACCEPT
 # Drop traffic NOT from our Geo-IP list.
 # This applies only to NEW, non-private traffic.
 -A LABO_INPUT -m set ! --match-set $ALLOW_LIST_NAME_V4 src -j LOG_AND_DROP_INPUT
@@ -711,15 +748,15 @@ apply_rules_nftables() {
             # These sets contain our whitelisted IPs.
 
             set private_nets_v4 {
-                type ipv4_addr; flags interval;
+                type ipv4_addr; flags interval; auto-merge;
                 elements = { 10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16 }
             }
             set private_nets_v6 {
-                type ipv6_addr; flags interval;
+                type ipv6_addr; flags interval; auto-merge;
                 elements = { fc00::/7, fe80::/10 }
             }
             set $ALLOW_LIST_NAME_V4 {
-                type ipv4_addr; flags interval;
+                type ipv4_addr; flags interval; auto-merge;
                 elements = {
 EOF
         # Inject IPv4 elements directly from the file stream
@@ -729,18 +766,16 @@ EOF
                 }
             }
 
-            # Dynamic sets for SSH brute-force (v4 + v6)
-            set ssh_ratelimit_v4 { type ipv4_addr; flags dynamic; timeout 10s; size 65536; }
-            set ssh_blacklist_v4 { type ipv4_addr; flags dynamic; timeout 5m; size 65536; }
-            set ssh_ratelimit_v6 { type ipv6_addr; flags dynamic; timeout 10s; size 65536; }
-            set ssh_blacklist_v6 { type ipv6_addr; flags dynamic; timeout 5m; size 65536; }
+            # Dynamic sets for SSH brute-force (v4 + v6) using meters (more efficient)
+            set ssh_meter_v4 { type ipv4_addr; flags dynamic; size 65536; }
+            set ssh_meter_v6 { type ipv6_addr; flags dynamic; size 65536; }
 EOF
 
         # Conditionally inject IPv6 set only if enabled
         if [[ "$GEOBLOCK_IPV6" == true ]]; then
             cat <<EOF
             set $ALLOW_LIST_NAME_V6 {
-                type ipv6_addr; flags interval;
+                type ipv6_addr; flags interval; auto-merge;
                 elements = {
 EOF
             cat "$v6_elements_file"
@@ -748,6 +783,23 @@ EOF
                 }
             }
 EOF
+        fi
+
+        # --- Flowtable Definition ---
+        local ft_devs=""
+        if [[ -n "$FLOWTABLE_INTERFACES" ]]; then
+            ft_devs=$(expand_interfaces "$FLOWTABLE_INTERFACES")
+            if [[ -n "$ft_devs" ]]; then
+                log "INFO" "Enabling Flowtable (Fasttrack) on interfaces: $ft_devs"
+                cat <<EOF
+            flowtable f {
+                hook ingress priority 0;
+                devices = { $ft_devs };
+            }
+EOF
+            else
+                log "WARN" "No valid interfaces found for Flowtable (after expansion). Skipping."
+            fi
         fi
 
         cat <<EOF
@@ -760,7 +812,7 @@ EOF
 
                 # 1. Accept critical system/stateful traffic immediately.
                 iifname "lo" accept
-                ct state related,established accept
+                ct state established,related accept
                 ct state invalid counter drop
 
                 # 2. Accept private networks (Docker, WG, LAN) to bypass Geo-IP.
@@ -779,6 +831,17 @@ EOF
 EOF
         if [[ "$GEOBLOCK_IPV6" == true ]]; then
             echo '                ip6 nexthdr != icmpv6 ip6 saddr != @'"$ALLOW_LIST_NAME_V6"' counter log prefix "PREROUTING6 GEO-DROP: " drop'
+        fi
+        cat <<EOF
+            }
+
+            # --- FORWARD Chain (Flowtable Offload) ---
+            chain FORWARD {
+                type filter hook forward priority filter; policy accept;
+EOF
+        if [[ -n "$ft_devs" ]]; then
+             echo '                # Offload established connections to flowtable'
+             echo '                ip protocol { tcp, udp } flow offload @f'
         fi
         cat <<EOF
             }
@@ -805,24 +868,19 @@ EOF
                 ip6 saddr @private_nets_v6 accept
                 iifname "lo" accept
 
-                # 4. SSH Brute Force Mitigation (v4)
-                ip saddr @ssh_blacklist_v4 counter log prefix "INPUT SSH BL-DROP: " drop
-                tcp dport $SSH_PORT ct state new \
-                    add @ssh_ratelimit_v4 { ip saddr limit rate over 10/second } \
-                    add @ssh_blacklist_v4 { ip saddr } \
-                    counter log prefix "INPUT SSH RATE-DROP: " drop
+                # 4. SSH Brute Force Mitigation (v4) - Optimized with Meter
+                #    If IP exceeds 10/second, it is dropped.
+                tcp dport $SSH_PORT ct state new meter ssh_meter_v4 { ip saddr limit rate over 10/second } counter log prefix "INPUT SSH RATE-DROP: " drop
 
-                # 5. SSH Brute Force Mitigation (v6)
-                ip6 saddr @ssh_blacklist_v6 counter log prefix "INPUT6 SSH BL-DROP: " drop
-                tcp dport $SSH_PORT ct state new \
-                    add @ssh_ratelimit_v6 { ip6 saddr limit rate over 10/second } \
-                    add @ssh_blacklist_v6 { ip6 saddr } \
-                    counter log prefix "INPUT6 SSH RATE-DROP: " drop
+                # 5. SSH Brute Force Mitigation (v6) - Optimized with Meter
+                tcp dport $SSH_PORT ct state new meter ssh_meter_v6 { ip6 saddr limit rate over 10/second } counter log prefix "INPUT6 SSH RATE-DROP: " drop
             }
         }
 EOF
-    ) | nft -o -f -
-    # Note: -o enables optimization, -f - reads from stdin
+    ) | nft -f -
+    # Note: -o (optimize) is intentionally omitted because it conflicts with 'auto-merge'
+    # and causes "File exists" errors. 'auto-merge' combined with 'iprange' already
+    # ensures the sets are optimized in the kernel.
 
     log "INFO" "nftables ruleset applied successfully."
 }
