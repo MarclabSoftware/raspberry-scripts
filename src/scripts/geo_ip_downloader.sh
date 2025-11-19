@@ -168,22 +168,32 @@ check_dependencies() {
 }
 
 # Centralized, robust function for downloading a file using curl.
+# Includes granular retry logic with exponential backoff.
 # @param $1 The URL to download
 # @param $2 The temporary output file path
 # @return 0 on success, 1 on failure
 download_file() {
     local url="$1"
     local temp_outfile="$2"
+    local retries=0
+    local max_retries=5
 
-    # -sSLf: Silent, follow redirects, fail fast on server errors (4xx, 5xx)
-    # --connect-timeout 10: Fail if connection is not made in 10s
-    # --max-time 30: Fail if the *entire* download takes longer than 30s
-    if ! curl -sSLf --connect-timeout 10 --max-time 30 "$url" -o "$temp_outfile"; then
-        log "WARN" "Download failed for $url."
+    while ((retries < max_retries)); do
+        # -sSLf: Silent, follow redirects, fail fast on server errors (4xx, 5xx)
+        # --connect-timeout 10: Fail if connection is not made in 10s
+        # --max-time 30: Fail if the *entire* download takes longer than 30s
+        if curl -sSLf --connect-timeout 10 --max-time 30 "$url" -o "$temp_outfile"; then
+            return 0 # Success
+        fi
+
+        ((retries++))
+        log "WARN" "Download failed for $url. Retry $retries/$max_retries..."
         rm -f "$temp_outfile"
-        return 1 # Return failure
-    fi
-    return 0 # Return success
+        sleep $((2 ** retries)) # Exponential backoff: 2s, 4s, 8s...
+    done
+
+    log "ERROR" "Failed to download $url after $max_retries attempts."
+    return 1 # Final failure
 }
 export -f download_file
 
@@ -341,59 +351,89 @@ download_provider_ripe() {
         log "INFO" "Using cached RIPE data file."
     fi
 
-    # 3. Parse the database for each country
-    log "INFO" "Parsing RIPE data for ${ripe_countries[*]} (this may take a moment)..."
+    # 3. Prepare for single-pass parsing
+    log "INFO" "Parsing RIPE data for ${ripe_countries[*]} (Single Pass)..."
+
+    # We construct a string mapping "COUNTRY:V4_FILE|V6_FILE" for awk
+    # and prepare the temp files.
+    local awk_targets=""
+    local -A temp_v4_files
+    local -A temp_v6_files
+
     for code in "${ripe_countries[@]}"; do
         local code_lower
         code_lower=$(echo "$code" | tr '[:upper:]' '[:lower:]')
-        local V4_OUT_FILE="$ALLOW_DIR/$code_lower.ripe.list.v4"
-        local V6_OUT_FILE="$ALLOW_DIR/$code_lower.ripe.list.v6"
-        local TEMP_V4_OUT_FILE="$V4_OUT_FILE.tmp"
-        local TEMP_V6_OUT_FILE="$V6_OUT_FILE.tmp"
+        
+        local v4_out="$ALLOW_DIR/$code_lower.ripe.list.v4"
+        local v6_out="$ALLOW_DIR/$code_lower.ripe.list.v6"
+        local temp_v4="$v4_out.tmp"
+        local temp_v6="$v6_out.tmp"
 
-        log "INFO" "Processing RIPE data for $code..."
-        # Ensure temp files are empty
-        true > "$TEMP_V4_OUT_FILE"
-        true > "$TEMP_V6_OUT_FILE"
+        # Ensure temp files are empty/exist
+        true > "$temp_v4"
+        true > "$temp_v6"
 
-        # Pass file paths and country code to awk via environment variables
-        export AWK_V4_FILE="$TEMP_V4_OUT_FILE"
-        export AWK_V6_FILE="$TEMP_V6_OUT_FILE"
-        export AWK_COUNTRY="$code"
+        temp_v4_files[$code]="$temp_v4"
+        temp_v6_files[$code]="$temp_v6"
 
-        # This awk script filters the RIPE db for the target country
-        # and calculates CIDR notation for IPv4 ranges.
-        awk '
-            BEGIN {
-                V4_FILE = ENVIRON["AWK_V4_FILE"]
-                V6_FILE = ENVIRON["AWK_V6_FILE"]
-                TARGET_COUNTRY = ENVIRON["AWK_COUNTRY"]
-                FS = "|"
+        # Append to target string (space separated)
+        awk_targets+="$code:$temp_v4|$temp_v6 "
+    done
+
+    export AWK_TARGETS="$awk_targets"
+
+    # 4. Run AWK once
+    awk '
+        BEGIN {
+            # Parse the targets map
+            # Format: "IT:path/to/v4|path/to/v6 FR:..."
+            split(ENVIRON["AWK_TARGETS"], targets, " ")
+            for (i in targets) {
+                split(targets[i], parts, ":")
+                country = parts[1]
+                split(parts[2], files, "|")
+                file_map_v4[country] = files[1]
+                file_map_v6[country] = files[2]
+                # Store country in a lookup for fast checking
+                target_countries[country] = 1
             }
+            FS = "|"
+        }
 
-            # Calculates CIDR mask from a host count
-            function calculate_v4_cidr(hosts) {
-                if (hosts == 0) return 32
-                return 32 - (log(hosts)/log(2))
+        # Calculates CIDR mask from a host count
+        function calculate_v4_cidr(hosts) {
+            if (hosts == 0) return 32
+            return 32 - (log(hosts)/log(2))
+        }
+
+        # File format: ...|COUNTRY_CODE|TYPE|START_IP|HOST_COUNT|...|STATUS
+        # $2 = Country, $7 = Status
+        ($2 in target_countries && $7 == "allocated") {
+            if ($3 == "ipv4") {
+                printf "%s/%d\n", $4, calculate_v4_cidr($5) >> file_map_v4[$2]
             }
-
-            # File format: ...|COUNTRY_CODE|TYPE|START_IP|HOST_COUNT|...|STATUS
-            ($2 == TARGET_COUNTRY && $7 == "allocated") {
-                if ($3 == "ipv4") {
-                    printf "%s/%d\n", $4, calculate_v4_cidr($5) >> V4_FILE
-                }
-                if ($3 == "ipv6") {
-                    # IPv6 format is simpler: START_IP/PREFIX_LENGTH
-                    printf "%s/%s\n", $4, $5 >> V6_FILE
-                }
+            else if ($3 == "ipv6") {
+                # IPv6 format is simpler: START_IP/PREFIX_LENGTH
+                printf "%s/%s\n", $4, $5 >> file_map_v6[$2]
             }
-        ' "$ripe_data_file"
+        }
+    ' "$ripe_data_file"
 
-        unset AWK_V4_FILE AWK_V6_FILE AWK_COUNTRY
+    unset AWK_TARGETS
 
-        # 4. Validate the resulting files
-        validate_and_move_generated_file "$TEMP_V4_OUT_FILE" "$V4_OUT_FILE" "IPv4 ($code, RIPE)"
-        validate_and_move_generated_file "$TEMP_V6_OUT_FILE" "$V6_OUT_FILE" "IPv6 ($code, RIPE)"
+    # 5. Validate and move all generated files
+    for code in "${ripe_countries[@]}"; do
+        local code_lower
+        code_lower=$(echo "$code" | tr '[:upper:]' '[:lower:]')
+        local v4_out="$ALLOW_DIR/$code_lower.ripe.list.v4"
+        local v6_out="$ALLOW_DIR/$code_lower.ripe.list.v6"
+        
+        # Retrieve temp files from our array
+        local temp_v4="${temp_v4_files[$code]}"
+        local temp_v6="${temp_v6_files[$code]}"
+
+        validate_and_move_generated_file "$temp_v4" "$v4_out" "IPv4 ($code, RIPE)"
+        validate_and_move_generated_file "$temp_v6" "$v6_out" "IPv6 ($code, RIPE)"
     done
 }
 ###################

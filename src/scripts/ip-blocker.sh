@@ -66,12 +66,15 @@ declare -r NFT_TABLE_NAME="labo_firewall"
 declare -r ALLOW_LIST_NAME_V4="allowlist_v4"
 declare -r ALLOW_LIST_NAME_V6="allowlist_v6"
 # Geo-IP Provider settings
-declare -r DEFAULT_PROVIDER="ipdeny" # Default provider if -p is not used
+# Default provider if -p is not used
+declare -r DEFAULT_PROVIDER="ipdeny"
 declare -r ALLOWED_PROVIDERS="ipdeny ripe nirsoft"
 # Max retries for downloader
 declare -r MAX_RETRIES=10
 # Sites to test connectivity
 declare -r CONNECTIVITY_CHECK_SITES=(github.com google.com)
+# Lock directory for singleton execution
+declare -r LOCK_DIR="/var/run/ip-blocker.lock"
 
 ###################
 # Global Variables
@@ -140,6 +143,10 @@ cleanup() {
             rm -rf "$TEMP_DIR"
             log "INFO" "Removed temporary directory: $TEMP_DIR"
         fi
+        if [[ -d "$LOCK_DIR" ]]; then
+            rm -rf "$LOCK_DIR"
+            log "INFO" "Released lock: $LOCK_DIR"
+        fi
     fi
 }
 
@@ -148,15 +155,39 @@ setup_temp_dir_and_traps() {
     # 1. Check root
     [[ "${EUID:-$(id -u)}" -ne 0 ]] && die "Please run as root/sudo"
 
-    # 2. Create secure temp directory
+    # 2. Acquire Lock (Atomic mkdir)
+    # This prevents multiple instances from running simultaneously.
+    if ! mkdir "$LOCK_DIR" 2>/dev/null; then
+        # Check if the process holding the lock is still alive
+        if [[ -f "$LOCK_DIR/pid" ]]; then
+            local lock_pid
+            lock_pid=$(cat "$LOCK_DIR/pid")
+            if kill -0 "$lock_pid" 2>/dev/null; then
+                die "Script is already running (PID: $lock_pid). Aborting."
+            else
+                log "WARN" "Stale lock found (PID: $lock_pid). Removing..."
+                rm -rf "$LOCK_DIR"
+                # Try to acquire again
+                if ! mkdir "$LOCK_DIR" 2>/dev/null; then
+                    die "Failed to acquire lock after removing stale lock."
+                fi
+            fi
+        else
+             die "Failed to acquire lock directory: $LOCK_DIR"
+        fi
+    fi
+    # Write our PID to the lock
+    echo "$$" > "$LOCK_DIR/pid"
+
+    # 3. Create secure temp directory
     # -t: creates in $TMPDIR or /tmp, with a template
     TEMP_DIR=$(mktemp -d -t ipblocker.XXXXXX) || die "Failed to create secure temp directory"
 
-    # 3. Set global paths for our temp files
+    # 4. Set global paths for our temp files
     IP_RANGE_FILE_V4="$TEMP_DIR/$ALLOW_LIST_NAME_V4.iprange.txt"
     IP_RANGE_FILE_V6="$TEMP_DIR/$ALLOW_LIST_NAME_V6.iprange.txt"
 
-    # 4. Setup traps (now that TEMP_DIR is set)
+    # 5. Setup traps (now that TEMP_DIR and Lock are set)
     setup_signal_handlers
 }
 
@@ -642,22 +673,28 @@ apply_rules_nftables() {
         ip6tables -X LABO_DOCKER_USER_V6 2>/dev/null || true
     fi
 
-    # --- Prepare sets ---
-    local nft_set_elements_v4
-    # Read the file, replace newlines with commas, remove trailing comma
-    nft_set_elements_v4=$(<"$IP_RANGE_FILE_V4" tr '\n' ',' | sed 's/,$//')
-    if [[ -z "$nft_set_elements_v4" ]]; then
-        log "WARN" "IPv4 range file is empty. Using dummy IP to prevent nft error."
-        nft_set_elements_v4="192.0.2.1" # RFC 5737 TEST-NET-1
+    # --- Prepare sets (Stream-based approach) ---
+    # We write the comma-separated elements to temp files instead of variables
+    # to avoid "Argument list too long" or memory issues with massive lists.
+    # This allows us to handle lists of any size (e.g., full continents).
+    
+    local v4_elements_file="$TEMP_DIR/v4_elements.nft"
+    if [[ -s "$IP_RANGE_FILE_V4" ]]; then
+        # Convert newlines to commas, remove trailing comma
+        tr '\n' ',' < "$IP_RANGE_FILE_V4" | sed 's/,$//' > "$v4_elements_file"
+    else
+        log "WARN" "IPv4 range file is empty. Using dummy IP."
+        echo "192.0.2.1" > "$v4_elements_file" # RFC 5737 TEST-NET-1
     fi
 
-    local nft_set_elements_v6=""
-    if [[ "$GEOBLOCK_IPV6" == true && -s "$IP_RANGE_FILE_V6" ]]; then
-        nft_set_elements_v6=$(<"$IP_RANGE_FILE_V6" tr '\n' ',' | sed 's/,$//')
-    fi
-    if [[ "$GEOBLOCK_IPV6" == true && -z "$nft_set_elements_v6" ]]; then
-        log "WARN" "IPv6 range file is empty. Using dummy IP to prevent nft error."
-        nft_set_elements_v6="2001:db8::1" # RFC 3849 documentation prefix
+    local v6_elements_file="$TEMP_DIR/v6_elements.nft"
+    if [[ "$GEOBLOCK_IPV6" == true ]]; then
+        if [[ -s "$IP_RANGE_FILE_V6" ]]; then
+            tr '\n' ',' < "$IP_RANGE_FILE_V6" | sed 's/,$//' > "$v6_elements_file"
+        else
+            log "WARN" "IPv6 range file is empty. Using dummy IP."
+            echo "2001:db8::1" > "$v6_elements_file"  # RFC 3849 documentation prefix
+        fi
     fi
 
     # --- Generate atomic ruleset ---
@@ -665,62 +702,59 @@ apply_rules_nftables() {
     log "INFO" "Flushing existing $NFT_TABLE_NAME table..."
     nft delete table inet $NFT_TABLE_NAME 2>/dev/null || true
 
-    # This applies the entire configuration atomatically.
-    cat <<-EOF | nft -o -f -
+    # We construct the config stream dynamically to inject the files.
+    # This subshell outputs the entire valid NFTables configuration.
+    (
+        cat <<EOF
         table inet $NFT_TABLE_NAME {
-
             # ========= SETS =========
             # These sets contain our whitelisted IPs.
 
             set private_nets_v4 {
-                type ipv4_addr
-                flags interval
+                type ipv4_addr; flags interval;
                 elements = { 10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16 }
             }
             set private_nets_v6 {
-                type ipv6_addr
-                flags interval
+                type ipv6_addr; flags interval;
                 elements = { fc00::/7, fe80::/10 }
             }
             set $ALLOW_LIST_NAME_V4 {
-                type ipv4_addr
-                flags interval
-                elements = { $nft_set_elements_v4 }
+                type ipv4_addr; flags interval;
+                elements = {
+EOF
+        # Inject IPv4 elements directly from the file stream
+        cat "$v4_elements_file"
+        
+        cat <<EOF
+                }
             }
 
             # Dynamic sets for SSH brute-force (v4 + v6)
-            set ssh_ratelimit_v4 {
-                type ipv4_addr
-                flags dynamic ; timeout 10s ; size 65536 ;
-            }
-            set ssh_blacklist_v4 {
-                type ipv4_addr
-                flags dynamic ; timeout 5m ; size 65536 ;
-            }
-            set ssh_ratelimit_v6 {
-                type ipv6_addr
-                flags dynamic ; timeout 10s ; size 65536 ;
-            }
-            set ssh_blacklist_v6 {
-                type ipv6_addr
-                flags dynamic ; timeout 5m ; size 65536 ;
-            }
+            set ssh_ratelimit_v4 { type ipv4_addr; flags dynamic; timeout 10s; size 65536; }
+            set ssh_blacklist_v4 { type ipv4_addr; flags dynamic; timeout 5m; size 65536; }
+            set ssh_ratelimit_v6 { type ipv6_addr; flags dynamic; timeout 10s; size 65536; }
+            set ssh_blacklist_v6 { type ipv6_addr; flags dynamic; timeout 5m; size 65536; }
+EOF
 
-            # Conditionally create the IPv6 set only if enabled
-            $(if [[ "$GEOBLOCK_IPV6" == true ]]; then
-                echo "
-                set $ALLOW_LIST_NAME_V6 {
-                    type ipv6_addr
-                    flags interval
-                    elements = { $nft_set_elements_v6 }
+        # Conditionally inject IPv6 set only if enabled
+        if [[ "$GEOBLOCK_IPV6" == true ]]; then
+            cat <<EOF
+            set $ALLOW_LIST_NAME_V6 {
+                type ipv6_addr; flags interval;
+                elements = {
+EOF
+            cat "$v6_elements_file"
+            cat <<EOF
                 }
-                "
-            fi)
+            }
+EOF
+        fi
 
+        cat <<EOF
             # ========= CHAINS =========
 
             # --- PREROUTING Chain (Main Gatekeeper) ---
-            # Filters *ALL* incoming traffic (Host + Forward) at the earliest
+            # Filters *ALL* incoming traffic (Host + Forward) at the earliest point.
             chain GEOIP_PREROUTING {
                 type filter hook prerouting priority mangle -2; policy accept;
 
@@ -742,18 +776,16 @@ apply_rules_nftables() {
                 ip saddr != @$ALLOW_LIST_NAME_V4 counter log prefix "PREROUTING GEO-DROP: " drop
 
                 # 5. Geo-IP v6 Filter (DROP, if enabled)
-                $(if [[ "$GEOBLOCK_IPV6" == true ]]; then
-                    # We already accepted icmpv6, so we only filter
-                    # other protocols that are NOT in the allowlist.
-                    echo "ip6 nexthdr != icmpv6 ip6 saddr != @$ALLOW_LIST_NAME_V6 counter log prefix \"PREROUTING6 GEO-DROP: \" drop"
-                fi)
-
-                # 6. (Implicit) All other traffic is ACCEPTED by the policy.
-                #    This includes:
-                #    - NEW traffic from @allowlist_v4 (for SSH, WG, ICMP, etc.)
-                #    - All IPv6 traffic (if GEOBLOCK_IPV6=false).
+EOF
+        if [[ "$GEOBLOCK_IPV6" == true ]]; then
+            echo '                ip6 nexthdr != icmpv6 ip6 saddr != @'"$ALLOW_LIST_NAME_V6"' counter log prefix "PREROUTING6 GEO-DROP: " drop'
+        fi
+        cat <<EOF
             }
 
+            # --- INPUT Chain (Host Protection) ---
+            # Handles traffic *to* this server that has *already passed* PREROUTING.
+            # We use 'policy accept' because the main filter is done.
             # --- INPUT Chain (Host Protection) ---
             # Handles traffic *to* this server that has *already passed* PREROUTING.
             # We use 'policy accept' because the main filter is done.
@@ -763,25 +795,35 @@ apply_rules_nftables() {
                 # 1. Drop invalid packets (redundant but safe).
                 ct state invalid counter drop
 
-                # 2. SSH Brute Force Mitigation (v4)
+                # 2. Optimization: Accept established/related traffic immediately.
+                #    This avoids checking SSH rules for every packet of an active session.
+                ct state related,established accept
+
+                # 3. Optimization: Accept private networks (LAN/Docker) immediately.
+                #    This aligns with iptables logic and prevents LAN lockouts/rate-limiting.
+                ip saddr @private_nets_v4 accept
+                ip6 saddr @private_nets_v6 accept
+                iifname "lo" accept
+
+                # 4. SSH Brute Force Mitigation (v4)
                 ip saddr @ssh_blacklist_v4 counter log prefix "INPUT SSH BL-DROP: " drop
                 tcp dport $SSH_PORT ct state new \
                     add @ssh_ratelimit_v4 { ip saddr limit rate over 10/second } \
                     add @ssh_blacklist_v4 { ip saddr } \
                     counter log prefix "INPUT SSH RATE-DROP: " drop
 
-                # 3. SSH Brute Force Mitigation (v6)
+                # 5. SSH Brute Force Mitigation (v6)
                 ip6 saddr @ssh_blacklist_v6 counter log prefix "INPUT6 SSH BL-DROP: " drop
                 tcp dport $SSH_PORT ct state new \
                     add @ssh_ratelimit_v6 { ip6 saddr limit rate over 10/second } \
                     add @ssh_blacklist_v6 { ip6 saddr } \
                     counter log prefix "INPUT6 SSH RATE-DROP: " drop
-
-                # 4. (Implicit) All other host traffic (SSH, WireGuard, ICMP)
-                #    that passed PREROUTING is allowed by the 'policy accept'.
             }
         }
 EOF
+    ) | nft -o -f -
+    # Note: -o enables optimization, -f - reads from stdin
+
     log "INFO" "nftables ruleset applied successfully."
 }
 
