@@ -868,12 +868,12 @@ EOF
                 ip6 saddr @private_nets_v6 accept
                 iifname "lo" accept
 
-                # 4. SSH Brute Force Mitigation (v4) - Optimized with Meter
+                # 4. SSH Brute Force Mitigation (v4) - Optimized with Dynamic Set
                 #    If IP exceeds 10/second, it is dropped.
-                tcp dport $SSH_PORT ct state new meter ssh_meter_v4 { ip saddr limit rate over 10/second } counter log prefix "INPUT SSH RATE-DROP: " drop
+                tcp dport $SSH_PORT ct state new update @ssh_meter_v4 { ip saddr limit rate over 10/second } counter log prefix "INPUT SSH RATE-DROP: " drop
 
-                # 5. SSH Brute Force Mitigation (v6) - Optimized with Meter
-                tcp dport $SSH_PORT ct state new meter ssh_meter_v6 { ip6 saddr limit rate over 10/second } counter log prefix "INPUT6 SSH RATE-DROP: " drop
+                # 5. SSH Brute Force Mitigation (v6) - Optimized with Dynamic Set
+                tcp dport $SSH_PORT ct state new update @ssh_meter_v6 { ip6 saddr limit rate over 10/second } counter log prefix "INPUT6 SSH RATE-DROP: " drop
             }
         }
 EOF
