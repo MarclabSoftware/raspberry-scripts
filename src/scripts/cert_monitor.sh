@@ -198,7 +198,7 @@ convert_with_retry() {
     local max_retries=6
     local retry_delay=10
     local attempt=1
-    local success=false
+
 
     log "INFO" "Starting conversion sequence... (Max $max_retries attempts)"
     
