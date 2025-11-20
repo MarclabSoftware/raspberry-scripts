@@ -24,8 +24,8 @@
 #   -h          Display this help message.
 #
 # Author: LaboDJ
-# Version: 6.3
-# Last Updated: 2025/11/15
+# Version: 6.4
+# Last Updated: 2025/11/20
 ###############################################################################
 
 # Enable strict mode
@@ -120,11 +120,24 @@ print_usage() {
 
 Usage: $0 -c PROVIDER:COUNTRIES_LIST[;PROVIDER2:LIST2...] [-h]
 
+Description:
+    Downloads and parses Geo-IP lists from specified providers.
+    Generates standardized .list.v4 and .list.v6 files in the 'lists/allow' directory.
+
 Options:
-    -c syntax   Provider and country list. [Mandatory]
-                Example: 'ripe:IT,FR;ipdeny:CN,KR;nirsoft:DE'
-                Simple form: 'ipdeny:US'
-    -h          Display this help message
+    -c syntax   Provider and country list specification. [Mandatory]
+                Format: 'provider:CC,CC;provider:CC'
+                
+                Examples:
+                  Single provider:   'ipdeny:US,CA'
+                  Multiple providers: 'ripe:IT,FR;ipdeny:CN,KR;nirsoft:DE'
+                  
+    -h          Display this help message.
+
+Providers:
+    ipdeny      - Aggregated zones (IPv4 & IPv6). Good general coverage.
+    ripe        - RIPE NCC Database (IPv4 & IPv6). High accuracy for Europe/Middle East.
+    nirsoft     - CSV format (IPv4 only). Good alternative source.
 EOF
     exit 1
 }
@@ -221,6 +234,16 @@ validate_and_move_generated_file() {
         log "ERROR" "DANGEROUS entry (e.g., 0.0.0.0/0 or ::/0) found in generated $list_name list. DISCARDING."
         rm -f "$temp_file"
         return
+    fi
+
+    # Check 3: Content Validity Check
+    # Ensure the file contains at least one valid-looking IP range or address.
+    # This prevents files with only garbage/html from being accepted.
+    # We use -m 1 to stop at the first match for efficiency.
+    if ! grep -Eq -m 1 '^[0-9a-fA-F:.]+(/[0-9]+)?$' "$temp_file"; then
+         log "WARN" "Generated $list_name list does not contain valid IP data. Ignoring."
+         rm -f "$temp_file"
+         return
     fi
 
     mv "$temp_file" "$final_file"
@@ -383,9 +406,12 @@ download_provider_ripe() {
     export AWK_TARGETS="$awk_targets"
 
     # 4. Run AWK once
+    # This AWK script performs a single-pass scan of the massive RIPE database.
+    # It filters entries by country and status, calculates CIDR prefixes for IPv4,
+    # and writes directly to the appropriate country/protocol files.
     awk '
         BEGIN {
-            # Parse the targets map
+            # Parse the targets map passed via environment variable.
             # Format: "IT:path/to/v4|path/to/v6 FR:..."
             split(ENVIRON["AWK_TARGETS"], targets, " ")
             for (i in targets) {
@@ -394,26 +420,35 @@ download_provider_ripe() {
                 split(parts[2], files, "|")
                 file_map_v4[country] = files[1]
                 file_map_v6[country] = files[2]
-                # Store country in a lookup for fast checking
+                # Store country in a lookup table for O(1) access
                 target_countries[country] = 1
             }
             FS = "|"
         }
 
-        # Calculates CIDR mask from a host count
+        # Calculates CIDR mask from a host count (IPv4 only).
+        # RIPE DB gives a number of hosts (e.g., 1024), we need the prefix length (e.g., /22).
+        # Formula: 32 - log2(hosts)
         function calculate_v4_cidr(hosts) {
             if (hosts == 0) return 32
             return 32 - (log(hosts)/log(2))
         }
 
-        # File format: ...|COUNTRY_CODE|TYPE|START_IP|HOST_COUNT|...|STATUS
-        # $2 = Country, $7 = Status
-        ($2 in target_countries && $7 == "allocated") {
+        # Main Loop: Process each line of the RIPE DB
+        # Format: registry|cc|type|start|value|date|status
+        # $2 = Country Code (e.g., IT)
+        # $3 = Type (ipv4, ipv6)
+        # $4 = Start IP
+        # $5 = Value (Host count for IPv4, Prefix length for IPv6)
+        # $7 = Status (allocated, assigned)
+        
+        ($2 in target_countries && ($7 == "allocated" || $7 == "assigned")) {
             if ($3 == "ipv4") {
+                # IPv4: Convert host count to CIDR and append to the countrys v4 file
                 printf "%s/%d\n", $4, calculate_v4_cidr($5) >> file_map_v4[$2]
             }
             else if ($3 == "ipv6") {
-                # IPv6 format is simpler: START_IP/PREFIX_LENGTH
+                # IPv6: Already in CIDR format (Start/Prefix), just append
                 printf "%s/%s\n", $4, $5 >> file_map_v6[$2]
             }
         }

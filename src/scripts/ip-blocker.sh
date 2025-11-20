@@ -10,9 +10,12 @@
 # - Auto-Backend: Prefers 'nftables', falls back to 'iptables'/'ipset'.
 # - Geo-IP Filtering: Full IPv4 & optional IPv6. Supports multiple providers
 #   (ipdeny, ripe, nirsoft) and manual 'lists/allow/*.v4' files.
+# - Flowtable Offload: Hardware/Software offload for established connections
+#   (nftables only) to boost throughput and reduce CPU load.
 # - Default Deny Policy: Secures the host (INPUT) while safely filtering
 #   Docker traffic (FORWARD) before Docker's own rules.
-# - Protection: Robust SSH rate-limiting (v4/v6) and IPv4 blocklist support.
+# - Protection: Robust SSH rate-limiting (v4/v6) using meters (nft) or recent
+#   module (iptables), plus IPv4 blocklist support.
 # - Safe & Atomic: Applies rules in a single transaction to prevent errors.
 # - Robust: Includes connectivity checks, download retries, and error trapping.
 #
@@ -21,18 +24,19 @@
 #
 # Options:
 #   -c countries   Specify allowed countries.
-#                  Simple: "IT,DE,FR" (uses provider from -f -p).
+#                  Simple: "IT,DE,FR" (uses provider from -p).
 #                  Advanced: "ripe:IT,FR;ipdeny:CN;nirsoft:KR,IT" (ignores -p).
 #   -p provider    Geo-IP provider: 'ipdeny', 'ripe', 'nirsoft' (default: ipdeny)
 #   -b             Enable (IPv4) blocklists.
 #   -G             Enable Geo-blocking for IPv6 (default: false, IPv6 is allowed).
 #   -s sshPort     Specify the SSH port (default: 22).
 #   -i interfaces  List of interfaces for Flowtable offload (e.g. "eth0 wg0").
+#                  Supports wildcards (e.g. "br-*").
 #   -h             Display this help message.
 #
 # Author: LaboDJ
-# Version: 5.1
-# Last Updated: 2025/11/15
+# Version: 5.2
+# Last Updated: 2025/11/20
 ###############################################################################
 
 # Enable strict mode:
@@ -288,6 +292,12 @@ detect_backend() {
         FIREWALL_BACKEND="nftables"
         REQUIRED_COMMANDS=(curl iprange ping nft)
         log "INFO" "Backend selected: nftables (native)"
+        
+        # Pre-flight check: Verify nftables functionality
+        # This catches issues like missing kernel modules or permission errors early.
+        if ! nft list tables >/dev/null 2>&1; then
+             die "nftables detected but 'nft list tables' failed. Check kernel support or permissions."
+        fi
 
     elif command -v iptables &>/dev/null && command -v ipset &>/dev/null; then
         FIREWALL_BACKEND="iptables"
@@ -479,7 +489,9 @@ generate_ip_list() {
              fi
         fi
     else
-        log "INFO" "IPv6 Geo-blocking is disabled. Skipping v6 list generation."
+        log "INFO" "IPv6 Geo-blocking is disabled (Default). Skipping v6 list generation."
+        # Ensure we don't leave stale files if the user toggled the flag
+        rm -f "$IP_RANGE_FILE_V6"
     fi
 
     cd "$SCRIPT_DIR" # Go back to base dir
@@ -588,16 +600,23 @@ apply_rules_iptables() {
 -A LABO_INPUT -j ACCEPT
 
 # --- LABO_DOCKER_USER Chain (Forwarded Traffic Protection) ---
-# This chain's logic was already correct.
+# This chain protects containers and other forwarded traffic.
+# It is inserted at the top of DOCKER-USER.
+
 -A LABO_DOCKER_USER -m state --state INVALID -j DROP
 -A LABO_DOCKER_USER -i lo -j RETURN
+# Allow private ranges to access Docker containers (e.g. from LAN)
 -A LABO_DOCKER_USER -s 10.0.0.0/8 -j RETURN
 -A LABO_DOCKER_USER -s 172.16.0.0/12 -j RETURN
 -A LABO_DOCKER_USER -s 192.168.0.0/16 -j RETURN
 -A LABO_DOCKER_USER -m state --state RELATED,ESTABLISHED -j RETURN
+
 # Geo-IP Filter: Drop NEW traffic not in our allowlist
+# We use LOG_AND_DROP_DOCKER to get visibility into what's being blocked.
 -A LABO_DOCKER_USER -m set ! --match-set $ALLOW_LIST_NAME_V4 src -j LOG_AND_DROP_DOCKER
+
 # Default Allow: Return to Docker's chains
+# If we passed all checks, we let Docker's own rules handle the rest.
 -A LABO_DOCKER_USER -j RETURN
 COMMIT
 EOF
@@ -807,24 +826,31 @@ EOF
 
             # --- PREROUTING Chain (Main Gatekeeper) ---
             # Filters *ALL* incoming traffic (Host + Forward) at the earliest point.
+            # Priority -2 (Mangle) is chosen to drop bad traffic BEFORE connection tracking (priority -200) 
+            # or other expensive operations, saving CPU.
             chain GEOIP_PREROUTING {
                 type filter hook prerouting priority mangle -2; policy accept;
 
                 # 1. Accept critical system/stateful traffic immediately.
+                #    'lo' is loopback (localhost).
+                #    'established,related' allows return traffic for connections we initiated.
                 iifname "lo" accept
                 ct state established,related accept
                 ct state invalid counter drop
 
                 # 2. Accept private networks (Docker, WG, LAN) to bypass Geo-IP.
+                #    This prevents locking ourselves out of local management.
                 ip saddr @private_nets_v4 accept
                 ip6 saddr @private_nets_v6 accept
 
                 # 3. CRITICAL: Allow all ICMPv6 *before* geo-blocking.
                 #    This is required for Neighbor Discovery (NDP) to work.
+                #    Blocking this breaks IPv6 connectivity completely.
                 ip6 nexthdr icmpv6 accept
 
                 # 4. Geo-IP v4 Filter (DROP)
                 #    Drop all NEW traffic that is NOT in the allowlist.
+                #    We use a 'set' for O(1) performance regardless of list size.
                 ip saddr != @$ALLOW_LIST_NAME_V4 counter log prefix "PREROUTING GEO-DROP: " drop
 
                 # 5. Geo-IP v6 Filter (DROP, if enabled)
@@ -836,11 +862,13 @@ EOF
             }
 
             # --- FORWARD Chain (Flowtable Offload) ---
+            # Handles traffic passing THROUGH the box (e.g., to Docker containers).
             chain FORWARD {
                 type filter hook forward priority filter; policy accept;
 EOF
         if [[ -n "$ft_devs" ]]; then
              echo '                # Offload established connections to flowtable'
+             echo '                # This bypasses the classic Linux network stack for high throughput.'
              echo '                ip protocol { tcp, udp } flow offload @f'
         fi
         cat <<EOF
