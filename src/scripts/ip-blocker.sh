@@ -31,7 +31,7 @@
 #   -G             Enable Geo-blocking for IPv6 (default: false, IPv6 is allowed).
 #   -s sshPort     Specify the SSH port (default: 22).
 #   -i interfaces  List of interfaces for Flowtable offload (e.g. "eth0 wg0").
-#                  Supports wildcards (e.g. "br-*").
+#                  Supports wildcards (e.g. "br-* wg* eth*").
 #   -h             Display this help message.
 #
 # Author: LaboDJ
@@ -215,7 +215,7 @@ Options:
     -b             Enable block lists (Applies to IPv4 only by default)
     -G             Enable Geo-blocking for IPv6 (default: false)
     -s sshPort     Specify SSH port (default: 22)
-    -i interfaces  Interfaces for Flowtable offload (e.g. "eth0 wg0")
+    -i interfaces  Interfaces for Flowtable offload (e.g. "eth0 wg0 br-*")
     -h             Display this help message
 EOF
     exit 1
@@ -292,7 +292,7 @@ detect_backend() {
         FIREWALL_BACKEND="nftables"
         REQUIRED_COMMANDS=(curl iprange ping nft)
         log "INFO" "Backend selected: nftables (native)"
-        
+
         # Pre-flight check: Verify nftables functionality
         # This catches issues like missing kernel modules or permission errors early.
         if ! nft list tables >/dev/null 2>&1; then
@@ -533,149 +533,235 @@ populate_ipset() {
 }
 
 # Apply all firewall rules using the legacy iptables backend
+# Apply all firewall rules using the legacy iptables backend
 apply_rules_iptables() {
     log "INFO" "Applying rules using iptables/ipset backend..."
 
-    # Clean up native nftables table (if it exists)
+    # Clean up native nftables table (if it exists) to prevent conflict
     log "INFO" "Cleaning up native nftables table (if any)..."
     nft delete table inet $NFT_TABLE_NAME 2>/dev/null || true
 
     # 1. Populate IPv4 ipset
     populate_ipset "$ALLOW_LIST_NAME_V4" "$IP_RANGE_FILE_V4" "inet"
 
-    # 2. Create/Flush our custom chains
-    log "INFO" "Creating/Flushing custom iptables chains..."
-    iptables -N LOG_AND_DROP_INPUT 2>/dev/null || iptables -F LOG_AND_DROP_INPUT
-    iptables -N LOG_AND_DROP_DOCKER 2>/dev/null || iptables -F LOG_AND_DROP_DOCKER
-    iptables -N LABO_INPUT 2>/dev/null || iptables -F LABO_INPUT
-    iptables -N LABO_DOCKER_USER 2>/dev/null || iptables -F LABO_DOCKER_USER
+    # 2. Cleanup Old Rules (Mangle + Filter + NAT)
+    log "INFO" "Cleaning up old iptables rules and chains..."
 
-    # 3. Remove old rules
-    log "INFO" "Cleaning up old rules from INPUT and DOCKER-USER chains..."
-    # Use 'while' loops to remove all existing instances of our rules
+    # Remove jumps from system chains FIRST
+    # We use 'while' loops to ensure we remove multiple instances if they exist
+    while iptables -t mangle -D PREROUTING -j LABO_PREROUTING 2>/dev/null; do :; done
     while iptables -D INPUT -j LABO_INPUT 2>/dev/null; do :; done
     while iptables -D DOCKER-USER -j LABO_DOCKER_USER 2>/dev/null; do :; done
-    while iptables -D INPUT -m set ! --match-set $ALLOW_LIST_NAME_V4 src -j LOG_AND_DROP_INPUT 2>/dev/null; do :; done
-    while iptables -D DOCKER-USER -m set ! --match-set $ALLOW_LIST_NAME_V4 src -j LOG_AND_DROP_DOCKER 2>/dev/null; do :; done
-    while iptables -D INPUT -p tcp --dport "$SSH_PORT" -m state --state NEW -m recent --set --name SSH --rsource 2>/dev/null; do :; done
-    while iptables -D INPUT -p tcp --dport "$SSH_PORT" -m state --state NEW -m recent --update --seconds 10 --hitcount 10 --name SSH --rsource -j LOG --log-prefix "SSH BRUTE DROP: " 2>/dev/null; do :; done
-    while iptables -D INPUT -p tcp --dport "$SSH_PORT" -m state --state NEW -m recent --update --seconds 10 --hitcount 10 --name SSH --rsource -j DROP 2>/dev/null; do :; done
-    while iptables -D INPUT -m state --state INVALID -j DROP 2>/dev/null; do :; done
-    while iptables -D INPUT -i lo -j ACCEPT 2>/dev/null; do :; done
-    while iptables -D INPUT -m state --state RELATED,ESTABLISHED -j ACCEPT 2>/dev/null; do :; done
-    while iptables -D DOCKER-USER -m state --state INVALID -j DROP 2>/dev/null; do :; done
-    while iptables -D DOCKER-USER -i lo -j RETURN 2>/dev/null; do :; done
-    while iptables -D DOCKER-USER -m state --state RELATED,ESTABLISHED -j RETURN 2>/dev/null; do :; done
-    log "INFO" "Cleanup of old rules complete."
+    while iptables -t nat -D POSTROUTING -j LABO_POSTROUTING 2>/dev/null; do :; done
 
-    # 4. Populate logging chains
-    iptables -A LOG_AND_DROP_INPUT -j LOG --log-level 4 --log-prefix "INPUT DROP: "
-    iptables -A LOG_AND_DROP_INPUT -j DROP
-    iptables -A LOG_AND_DROP_DOCKER -j LOG --log-level 4 --log-prefix "DOCKER DROP: "
-    iptables -A LOG_AND_DROP_DOCKER -j DROP
+    # Flush and Delete custom chains
+    iptables -t mangle -F LABO_PREROUTING 2>/dev/null || true
+    iptables -t mangle -X LABO_PREROUTING 2>/dev/null || true
 
-    # 5. Apply IPv4 rules using iptables-restore
+    iptables -t filter -F LABO_INPUT 2>/dev/null || true
+    iptables -t filter -X LABO_INPUT 2>/dev/null || true
+
+    iptables -t filter -F LABO_DOCKER_USER 2>/dev/null || true
+    iptables -t filter -X LABO_DOCKER_USER 2>/dev/null || true
+
+    iptables -t nat -F LABO_POSTROUTING 2>/dev/null || true
+    iptables -t nat -X LABO_POSTROUTING 2>/dev/null || true
+
+    # 3. Apply IPv4 Rules (Atomic Restore)
+    # We use *mangle for PREROUTING (Gatekeeper) and *filter for INPUT/FORWARD protection.
     local IPTABLES_RULES_FILE="$TEMP_DIR/iptables.rules"
     cat > "$IPTABLES_RULES_FILE" <<-EOF
+*mangle
+:LABO_PREROUTING - [0:0]
+
+# --- LABO_PREROUTING Chain (Gatekeeper) ---
+# Equivalent to nftables 'prerouting' hook.
+# Filters traffic BEFORE routing decisions.
+
+# 1. Drop Invalid
+-A LABO_PREROUTING -m state --state INVALID -j DROP
+
+# 2. Optimization: Accept Established/Related immediately
+-A LABO_PREROUTING -m state --state RELATED,ESTABLISHED -j ACCEPT
+
+# 3. Critical System & Local Traffic
+-A LABO_PREROUTING -i lo -j ACCEPT
+# In iptables, '+' is the wildcard (equivalent to '*' in nft/shell)
+-A LABO_PREROUTING -i docker0 -j ACCEPT
+-A LABO_PREROUTING -i br+ -j ACCEPT
+# WireGuard interfaces (inner traffic)
+-A LABO_PREROUTING -i wg+ -j ACCEPT
+
+# 4. Accept Private Networks (Bypass GeoIP)
+-A LABO_PREROUTING -s 10.0.0.0/8 -j ACCEPT
+-A LABO_PREROUTING -s 172.16.0.0/12 -j ACCEPT
+-A LABO_PREROUTING -s 192.168.0.0/16 -j ACCEPT
+
+# 5. Geo-IP Filter (DROP)
+# Drop NEW traffic not in allowlist
+-A LABO_PREROUTING -m set ! --match-set $ALLOW_LIST_NAME_V4 src -j DROP
+
+# 6. Default: Accept (Pass to next table)
+-A LABO_PREROUTING -j ACCEPT
+COMMIT
+
 *filter
 :LABO_INPUT - [0:0]
 :LABO_DOCKER_USER - [0:0]
 
 # --- LABO_INPUT Chain (Host Protection) ---
-# Base rules: allow traffic that is always safe
+# Traffic has already passed GeoIP in mangle table.
+
 -A LABO_INPUT -m state --state INVALID -j DROP
 -A LABO_INPUT -i lo -j ACCEPT
 -A LABO_INPUT -m state --state RELATED,ESTABLISHED -j ACCEPT
 -A LABO_INPUT -s 10.0.0.0/8 -j ACCEPT
 -A LABO_INPUT -s 172.16.0.0/12 -j ACCEPT
 -A LABO_INPUT -s 192.168.0.0/16 -j ACCEPT
-# Drop traffic NOT from our Geo-IP list.
-# This applies only to NEW, non-private traffic.
--A LABO_INPUT -m set ! --match-set $ALLOW_LIST_NAME_V4 src -j LOG_AND_DROP_INPUT
 -A LABO_INPUT -p icmp -j ACCEPT
+
+# Trust local interfaces
+-A LABO_INPUT -i docker0 -j ACCEPT
+-A LABO_INPUT -i br+ -j ACCEPT
+# Trust WireGuard interfaces
+-A LABO_INPUT -i wg+ -j ACCEPT
+
 # SSH Brute Force Mitigation (IPv4)
 -A LABO_INPUT -p tcp --dport $SSH_PORT -m state --state NEW -m recent --set --name SSH --rsource
 -A LABO_INPUT -p tcp --dport $SSH_PORT -m state --state NEW -m recent --update --seconds 10 --hitcount 10 --name SSH --rsource -j LOG --log-prefix "SSH BRUTE DROP: "
 -A LABO_INPUT -p tcp --dport $SSH_PORT -m state --state NEW -m recent --update --seconds 10 --hitcount 10 --name SSH --rsource -j DROP
 -A LABO_INPUT -j ACCEPT
 
-# --- LABO_DOCKER_USER Chain (Forwarded Traffic Protection) ---
-# This chain protects containers and other forwarded traffic.
-# It is inserted at the top of DOCKER-USER.
+# --- LABO_DOCKER_USER Chain (Forwarding) ---
+# Protects Docker containers.
+# Mirrors the 'FORWARD' chain logic in nftables.
 
 -A LABO_DOCKER_USER -m state --state INVALID -j DROP
+-A LABO_DOCKER_USER -m state --state RELATED,ESTABLISHED -j RETURN
+
+# Explicitly trust Docker interfaces (using '+' wildcard)
+-A LABO_DOCKER_USER -i docker0 -j RETURN
+-A LABO_DOCKER_USER -o docker0 -j RETURN
+-A LABO_DOCKER_USER -i br+ -j RETURN
+-A LABO_DOCKER_USER -o br+ -j RETURN
+# Explicitly trust WireGuard interfaces
+-A LABO_DOCKER_USER -i wg+ -j RETURN
+-A LABO_DOCKER_USER -o wg+ -j RETURN
+
+# Private Nets & Loopback
 -A LABO_DOCKER_USER -i lo -j RETURN
-# Allow private ranges to access Docker containers (e.g. from LAN)
 -A LABO_DOCKER_USER -s 10.0.0.0/8 -j RETURN
 -A LABO_DOCKER_USER -s 172.16.0.0/12 -j RETURN
 -A LABO_DOCKER_USER -s 192.168.0.0/16 -j RETURN
--A LABO_DOCKER_USER -m state --state RELATED,ESTABLISHED -j RETURN
 
-# Geo-IP Filter: Drop NEW traffic not in our allowlist
-# We use LOG_AND_DROP_DOCKER to get visibility into what's being blocked.
--A LABO_DOCKER_USER -m set ! --match-set $ALLOW_LIST_NAME_V4 src -j LOG_AND_DROP_DOCKER
-
-# Default Allow: Return to Docker's chains
-# If we passed all checks, we let Docker's own rules handle the rest.
+# Note: GeoIP dropping happened in 'mangle' table.
+# If we reached here, the packet is valid or established.
 -A LABO_DOCKER_USER -j RETURN
+COMMIT
+
+*nat
+:LABO_POSTROUTING - [0:0]
+
+# --- LABO_POSTROUTING Chain (Masquerade) ---
+-A LABO_POSTROUTING -o eth+ -j MASQUERADE
+-A LABO_POSTROUTING -o en+ -j MASQUERADE
 COMMIT
 EOF
 
+    # Apply Rules
     iptables-restore --noflush < "$IPTABLES_RULES_FILE" || die "Failed to apply iptables rules"
 
-    # 6. Insert jumps to our new, clean chains
+    # Hook into system chains
+    iptables -t mangle -I PREROUTING 1 -j LABO_PREROUTING
     iptables -I INPUT 1 -j LABO_INPUT
     iptables -I DOCKER-USER 1 -j LABO_DOCKER_USER
+    iptables -t nat -I POSTROUTING 1 -j LABO_POSTROUTING
 
     log "INFO" "iptables (IPv4) rules applied successfully."
 
-    # 7. Handle IPv6
+    # 4. Handle IPv6 (ip6tables)
     if [[ "$GEOBLOCK_IPV6" == true ]]; then
         log "INFO" "Applying ip6tables (IPv6) rules..."
         if [[ -s "$IP_RANGE_FILE_V6" ]]; then
             populate_ipset "$ALLOW_LIST_NAME_V6" "$IP_RANGE_FILE_V6" "inet6"
 
-            ip6tables -N LABO_INPUT_V6 2>/dev/null || ip6tables -F LABO_INPUT_V6
-            ip6tables -N LABO_DOCKER_USER_V6 2>/dev/null || ip6tables -F LABO_DOCKER_USER_V6
+            # Cleanup IPv6
+            log "INFO" "Cleaning up old ip6tables rules..."
+            while ip6tables -t mangle -D PREROUTING -j LABO_PREROUTING_V6 2>/dev/null; do :; done
+            while ip6tables -D INPUT -j LABO_INPUT_V6 2>/dev/null; do :; done
+            while ip6tables -D DOCKER-USER -j LABO_DOCKER_USER_V6 2>/dev/null; do :; done
+
+            ip6tables -t mangle -F LABO_PREROUTING_V6 2>/dev/null || true
+            ip6tables -t mangle -X LABO_PREROUTING_V6 2>/dev/null || true
+
+            ip6tables -t filter -F LABO_INPUT_V6 2>/dev/null || true
+            ip6tables -t filter -X LABO_INPUT_V6 2>/dev/null || true
+
+            ip6tables -t filter -F LABO_DOCKER_USER_V6 2>/dev/null || true
+            ip6tables -t filter -X LABO_DOCKER_USER_V6 2>/dev/null || true
 
             local IP6TABLES_RULES_FILE="$TEMP_DIR/ip6tables.rules"
             cat > "$IP6TABLES_RULES_FILE" <<-EOF
+*mangle
+:LABO_PREROUTING_V6 - [0:0]
+
+# --- LABO_PREROUTING_V6 (Gatekeeper) ---
+-A LABO_PREROUTING_V6 -m state --state INVALID -j DROP
+-A LABO_PREROUTING_V6 -m state --state RELATED,ESTABLISHED -j ACCEPT
+-A LABO_PREROUTING_V6 -i lo -j ACCEPT
+-A LABO_PREROUTING_V6 -i docker0 -j ACCEPT
+-A LABO_PREROUTING_V6 -i br+ -j ACCEPT
+-A LABO_PREROUTING_V6 -i wg+ -j ACCEPT
+
+# Accept Private & Multicast
+-A LABO_PREROUTING_V6 -s fe80::/10 -j ACCEPT
+-A LABO_PREROUTING_V6 -s fc00::/7 -j ACCEPT
+-A LABO_PREROUTING_V6 -s ff00::/8 -j ACCEPT
+
+# CRITICAL: ICMPv6 must be accepted before GeoIP
+-A LABO_PREROUTING_V6 -p icmpv6 -j ACCEPT
+
+# Geo-IP Filter (DROP)
+-A LABO_PREROUTING_V6 -m set ! --match-set $ALLOW_LIST_NAME_V6 src -j DROP
+
+-A LABO_PREROUTING_V6 -j ACCEPT
+COMMIT
+
 *filter
 :LABO_INPUT_V6 - [0:0]
 :LABO_DOCKER_USER_V6 - [0:0]
 
-# --- LABO_INPUT_V6 Chain (Host Protection) ---
+# --- LABO_INPUT_V6 ---
 -A LABO_INPUT_V6 -m state --state INVALID -j DROP
--A LABO_INPUT_V6 -i lo -j ACCEPT
 -A LABO_INPUT_V6 -m state --state RELATED,ESTABLISHED -j ACCEPT
+-A LABO_INPUT_V6 -i lo -j ACCEPT
 -A LABO_INPUT_V6 -s fe80::/10 -j ACCEPT
--A LABO_INPUT_V6 -s fc00::/7 -j ACCEPT
-# Log and Drop non-allowlisted Geo-IP traffic
--A LABO_INPUT_V6 -m set ! --match-set $ALLOW_LIST_NAME_V6 src -j DROP
 -A LABO_INPUT_V6 -p icmpv6 -j ACCEPT
-# SSH Brute Force Mitigation (IPv6, rate-limit only)
+-A LABO_INPUT_V6 -i wg+ -j ACCEPT
+
+# SSH Rate Limit (IPv6)
 -A LABO_INPUT_V6 -p tcp --dport $SSH_PORT -m hashlimit --hashlimit-name ssh_v6_limit --hashlimit-mode srcip --hashlimit-above 10/second -j LOG --log-prefix "IP6 SSH RATE-DROP: "
 -A LABO_INPUT_V6 -p tcp --dport $SSH_PORT -m hashlimit --hashlimit-name ssh_v6_limit --hashlimit-mode srcip --hashlimit-above 10/second -j DROP
 -A LABO_INPUT_V6 -j ACCEPT
 
-# --- LABO_DOCKER_USER_V6 Chain (Forwarded Traffic Protection) ---
+# --- LABO_DOCKER_USER_V6 ---
 -A LABO_DOCKER_USER_V6 -m state --state INVALID -j DROP
--A LABO_DOCKER_USER_V6 -i lo -j RETURN
--A LABO_DOCKER_USER_V6 -s fe80::/10 -j RETURN
--A LABO_DOCKER_USER_V6 -s fc00::/7 -j RETURN
 -A LABO_DOCKER_USER_V6 -m state --state RELATED,ESTABLISHED -j RETURN
-# Geo-IP Filter: Drop traffic not in our allowlist
--A LABO_DOCKER_USER_V6 -m set ! --match-set $ALLOW_LIST_NAME_V6 src -j DROP
-# Default Allow: Return to Docker's chains
+-A LABO_DOCKER_USER_V6 -i lo -j RETURN
+-A LABO_DOCKER_USER_V6 -i docker0 -j RETURN
+-A LABO_DOCKER_USER_V6 -o docker0 -j RETURN
+-A LABO_DOCKER_USER_V6 -i br+ -j RETURN
+-A LABO_DOCKER_USER_V6 -o br+ -j RETURN
+-A LABO_DOCKER_USER_V6 -i wg+ -j RETURN
+-A LABO_DOCKER_USER_V6 -o wg+ -j RETURN
+-A LABO_DOCKER_USER_V6 -s fe80::/10 -j RETURN
 -A LABO_DOCKER_USER_V6 -j RETURN
 COMMIT
 EOF
             ip6tables-restore --noflush < "$IP6TABLES_RULES_FILE" || die "Failed to apply ip6tables rules"
 
-            ip6tables -D INPUT -j LABO_INPUT_V6 2>/dev/null || true
+            ip6tables -t mangle -I PREROUTING 1 -j LABO_PREROUTING_V6
             ip6tables -I INPUT 1 -j LABO_INPUT_V6
-
-            ip6tables -D DOCKER-USER -j LABO_DOCKER_USER_V6 2>/dev/null || true
             ip6tables -I DOCKER-USER 1 -j LABO_DOCKER_USER_V6
 
             log "INFO" "ip6tables (IPv6) rules applied successfully."
@@ -683,17 +769,19 @@ EOF
             log "WARN" "IPv6 range file is empty. Skipping IPv6 rule application."
         fi
     else
-        log "INFO" "IPv6 Geo-blocking disabled. Checking if ip6tables is installed to flush rules..."
+        # Flush if IPv6 GeoBlocking is disabled but backend is iptables
         if command -v ip6tables &>/dev/null; then
-            log "INFO" "ip6tables found. Flushing our custom chains to ensure IPv6 is open."
-            ip6tables -D INPUT -j LABO_INPUT_V6 2>/dev/null || true
-            ip6tables -D DOCKER-USER -j LABO_DOCKER_USER_V6 2>/dev/null || true
-            ip6tables -F LABO_INPUT_V6 2>/dev/null || true
-            ip6tables -F LABO_DOCKER_USER_V6 2>/dev/null || true
-            ip6tables -X LABO_INPUT_V6 2>/dev/null || true
-            ip6tables -X LABO_DOCKER_USER_V6 2>/dev/null || true
-        else
-            log "INFO" "ip6tables not found, skipping v6 flush."
+             log "INFO" "Flushing IPv6 rules (Geo-blocking disabled)..."
+             while ip6tables -t mangle -D PREROUTING -j LABO_PREROUTING_V6 2>/dev/null; do :; done
+             while ip6tables -D INPUT -j LABO_INPUT_V6 2>/dev/null; do :; done
+             while ip6tables -D DOCKER-USER -j LABO_DOCKER_USER_V6 2>/dev/null; do :; done
+
+             ip6tables -t mangle -F LABO_PREROUTING_V6 2>/dev/null || true
+             ip6tables -t mangle -X LABO_PREROUTING_V6 2>/dev/null || true
+             ip6tables -t filter -F LABO_INPUT_V6 2>/dev/null || true
+             ip6tables -t filter -X LABO_INPUT_V6 2>/dev/null || true
+             ip6tables -t filter -F LABO_DOCKER_USER_V6 2>/dev/null || true
+             ip6tables -t filter -X LABO_DOCKER_USER_V6 2>/dev/null || true
         fi
     fi
 }
@@ -712,20 +800,34 @@ apply_rules_nftables() {
     # This prevents conflicts if switching from iptables to nftables.
     if command -v iptables &>/dev/null; then
         log "INFO" "Cleaning up legacy iptables rules..."
-        iptables -D INPUT -j LABO_INPUT 2>/dev/null || true
-        iptables -D DOCKER-USER -j LABO_DOCKER_USER 2>/dev/null || true
+        # Remove jumps from system chains
+        while iptables -t mangle -D PREROUTING -j LABO_PREROUTING 2>/dev/null; do :; done
+        while iptables -D INPUT -j LABO_INPUT 2>/dev/null; do :; done
+        while iptables -D DOCKER-USER -j LABO_DOCKER_USER 2>/dev/null; do :; done
+
+        # Flush and delete custom chains
+        iptables -t mangle -F LABO_PREROUTING 2>/dev/null || true
+        iptables -t mangle -X LABO_PREROUTING 2>/dev/null || true
+
         iptables -F LABO_INPUT 2>/dev/null || true
-        iptables -F LABO_DOCKER_USER 2>/dev/null || true
         iptables -X LABO_INPUT 2>/dev/null || true
+
+        iptables -F LABO_DOCKER_USER 2>/dev/null || true
         iptables -X LABO_DOCKER_USER 2>/dev/null || true
     fi
     if command -v ip6tables &>/dev/null; then
         log "INFO" "Cleaning up legacy ip6tables rules..."
-        ip6tables -D INPUT -j LABO_INPUT_V6 2>/dev/null || true
-        ip6tables -D DOCKER-USER -j LABO_DOCKER_USER_V6 2>/dev/null || true
+        while ip6tables -t mangle -D PREROUTING -j LABO_PREROUTING_V6 2>/dev/null; do :; done
+        while ip6tables -D INPUT -j LABO_INPUT_V6 2>/dev/null; do :; done
+        while ip6tables -D DOCKER-USER -j LABO_DOCKER_USER_V6 2>/dev/null; do :; done
+
+        ip6tables -t mangle -F LABO_PREROUTING_V6 2>/dev/null || true
+        ip6tables -t mangle -X LABO_PREROUTING_V6 2>/dev/null || true
+
         ip6tables -F LABO_INPUT_V6 2>/dev/null || true
-        ip6tables -F LABO_DOCKER_USER_V6 2>/dev/null || true
         ip6tables -X LABO_INPUT_V6 2>/dev/null || true
+
+        ip6tables -F LABO_DOCKER_USER_V6 2>/dev/null || true
         ip6tables -X LABO_DOCKER_USER_V6 2>/dev/null || true
     fi
 
@@ -733,7 +835,7 @@ apply_rules_nftables() {
     # We write the comma-separated elements to temp files instead of variables
     # to avoid "Argument list too long" or memory issues with massive lists.
     # This allows us to handle lists of any size (e.g., full continents).
-    
+
     local v4_elements_file="$TEMP_DIR/v4_elements.nft"
     if [[ -s "$IP_RANGE_FILE_V4" ]]; then
         # Convert newlines to commas, remove trailing comma
@@ -772,7 +874,7 @@ apply_rules_nftables() {
             }
             set private_nets_v6 {
                 type ipv6_addr; flags interval; auto-merge;
-                elements = { fc00::/7, fe80::/10 }
+                elements = { fc00::/7, fe80::/10, ff00::/8 }
             }
             set $ALLOW_LIST_NAME_V4 {
                 type ipv4_addr; flags interval; auto-merge;
@@ -780,7 +882,7 @@ apply_rules_nftables() {
 EOF
         # Inject IPv4 elements directly from the file stream
         cat "$v4_elements_file"
-        
+
         cat <<EOF
                 }
             }
@@ -826,7 +928,7 @@ EOF
 
             # --- PREROUTING Chain (Main Gatekeeper) ---
             # Filters *ALL* incoming traffic (Host + Forward) at the earliest point.
-            # Priority -2 (Mangle) is chosen to drop bad traffic BEFORE connection tracking (priority -200) 
+            # Priority -2 (Mangle) is chosen to drop bad traffic BEFORE connection tracking (priority -200)
             # or other expensive operations, saving CPU.
             chain GEOIP_PREROUTING {
                 type filter hook prerouting priority mangle -2; policy accept;
@@ -872,11 +974,23 @@ EOF
              echo '                ip protocol { tcp, udp } flow offload @f'
         fi
         cat <<EOF
+
+                # Optimization: Accept established/related traffic immediately.
+                # This saves CPU cycles by avoiding rule evaluation for every packet in the stream.
+                ct state established,related accept
+
+                # Docker Integration: Explicitly accept traffic on Docker interfaces.
+                # Although the policy is accept, explicit rules ensure traffic flow regardless
+                # of future policy changes or interactions with Docker's own chains.
+                # Added WireGuard (wg*) support for VPN traffic forwarding.
+                iifname { "lo", "docker0" } accept
+                iifname "wg*" accept
+                iifname "br-*" accept
+                oifname "docker0" accept
+                oifname "wg*" accept
+                oifname "br-*" accept
             }
 
-            # --- INPUT Chain (Host Protection) ---
-            # Handles traffic *to* this server that has *already passed* PREROUTING.
-            # We use 'policy accept' because the main filter is done.
             # --- INPUT Chain (Host Protection) ---
             # Handles traffic *to* this server that has *already passed* PREROUTING.
             # We use 'policy accept' because the main filter is done.
@@ -894,7 +1008,10 @@ EOF
                 #    This aligns with iptables logic and prevents LAN lockouts/rate-limiting.
                 ip saddr @private_nets_v4 accept
                 ip6 saddr @private_nets_v6 accept
-                iifname "lo" accept
+                # Trust local interfaces and WireGuard
+                iifname { "lo", "docker0" } accept
+                iifname "wg*" accept
+                iifname "br-*" accept
 
                 # 4. SSH Brute Force Mitigation (v4) - Optimized with Dynamic Set
                 #    If IP exceeds 10/second, it is dropped.
@@ -903,6 +1020,13 @@ EOF
                 # 5. SSH Brute Force Mitigation (v6) - Optimized with Dynamic Set
                 tcp dport $SSH_PORT ct state new update @ssh_meter_v6 { ip6 saddr limit rate over 10/second } counter log prefix "INPUT6 SSH RATE-DROP: " drop
             }
+
+            # --- POSTROUTING Chain (NAT) ---
+            chain POSTROUTING {
+                type nat hook postrouting priority srcnat; policy accept;
+                oifname "eth*" masquerade
+                oifname "en*" masquerade
+            }  
         }
 EOF
     ) | nft -f -
