@@ -15,9 +15,10 @@
 # - Default Deny Policy: Secures the host (INPUT) while safely filtering
 #   Docker traffic (FORWARD) before Docker's own rules.
 # - Protection: Robust SSH rate-limiting (v4/v6) using meters (nft) or recent
-#   module (iptables), plus IPv4 blocklist support.
+#   module (iptables), plus full Blocklist support (v4/v6).
 # - Safe & Atomic: Applies rules in a single transaction to prevent errors.
-# - Robust: Includes connectivity checks, download retries, and error trapping.
+# - Robust: Includes connectivity checks, fail-fast downloads, resilient HTML
+#   content rejection for lists, and smart error trapping.
 #
 # Usage:
 #   sudo ./ip-blocker.sh [-c COUNTRIES] [-p PROVIDER] [-b] [-G] [-s SSH_PORT] [-i INTERFACES] [-h]
@@ -27,7 +28,7 @@
 #                  Simple: "IT,DE,FR" (uses provider from -p).
 #                  Advanced: "ripe:IT,FR;ipdeny:CN;nirsoft:KR,IT" (ignores -p).
 #   -p provider    Geo-IP provider: 'ipdeny', 'ripe', 'nirsoft' (default: ipdeny)
-#   -b             Enable (IPv4) blocklists.
+#   -b             Enable block lists (IPv4 always; IPv6 if -G is enabled).
 #   -G             Enable Geo-blocking for IPv6 (default: false, IPv6 is allowed).
 #   -s sshPort     Specify the SSH port (default: 22).
 #   -i interfaces  List of interfaces for Flowtable offload (e.g. "eth0 wg0").
@@ -35,8 +36,8 @@
 #   -h             Display this help message.
 #
 # Author: LaboDJ
-# Version: 5.3
-# Last Updated: 2025/12/29
+# Version: 5.4
+# Last Updated: 2025/12/30
 ###############################################################################
 
 # Enable strict mode:
@@ -220,8 +221,8 @@ Options:
                    Simple: "IT,DE,FR" (uses provider from -p).
                    Advanced: "ripe:IT,FR;ipdeny:CN;nirsoft:KR,IT" (ignores -p).
     -p provider    Geo-IP provider: 'ipdeny', 'ripe', 'nirsoft' (default: $DEFAULT_PROVIDER)
-    -b             Enable block lists (Applies to IPv4 only by default)
-    -G             Enable Geo-blocking for IPv6 (default: false)
+    -b             Enable block lists (Applies to IPv4; IPv6 if -G also set)
+    -G             Enable Geo-blocking for IPv6 (default: false; needed for v6 blocks)
     -s sshPort     Specify SSH port (default: 22)
     -i interfaces  Interfaces for Flowtable offload (e.g. "eth0 wg0 br-*")
     -h             Display this help message
