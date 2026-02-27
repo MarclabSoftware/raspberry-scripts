@@ -5,6 +5,8 @@
 #
 # Configures a robust, hybrid-backend firewall (nftables/iptables) with a
 # focus on Geo-IP filtering, SSH brute-force mitigation, and Docker protection.
+# Supports systemd-networkd renamed interfaces (e.g. lan_server) alongside
+# standard eth*/en* names — interfaces that don't exist are safely ignored.
 #
 # Core Features:
 # - Auto-Backend: Prefers 'nftables', falls back to 'iptables'/'ipset'.
@@ -36,8 +38,8 @@
 #   -h             Display this help message.
 #
 # Author: LaboDJ
-# Version: 5.4
-# Last Updated: 2025/12/30
+# Version: 5.5
+# Last Updated: 2026/02/27
 ###############################################################################
 
 # Enable strict mode:
@@ -83,6 +85,12 @@ declare -r MAX_RETRIES=10
 declare -r CONNECTIVITY_CHECK_SITES=(github.com google.com)
 # Lock directory for singleton execution
 declare -r LOCK_DIR="/var/run/ip-blocker.lock"
+# Interfaces used for POSTROUTING masquerade (NAT).
+# Wildcards are expanded by the firewall backend:
+#   nftables: oifname "eth*"    (native glob, safe if iface doesn't exist)
+#   iptables: -o eth+           ('+' = kernel wildcard, safe if iface doesn't exist)
+# "lan_server" is a systemd-networkd renamed interface; if absent, rules simply never match.
+declare -ra NAT_INTERFACES=("eth*" "en*" "lan_server")
 
 ###################
 # Global Variables
@@ -343,7 +351,7 @@ retry_command() {
 
         ((retries++))
         log "WARN" "Command failed: ${command[*]}. Retry $retries/$MAX_RETRIES"
-        sleep $((2 ** retries)) # 1s, 2s, 4s, 8s...
+        sleep $((2 ** retries)) # 2s, 4s, 8s, 16s...
     done
 
     die "Command failed after $MAX_RETRIES retries: ${command[*]}"
@@ -358,8 +366,10 @@ expand_interfaces() {
         if [[ "$pattern" == *"*"* ]]; then
             # Expand wildcard using /sys/class/net
             # Expand wildcard using compgen to avoid SC2206
+            # We append '|| true' because if no matches are found, compgen returns 1,
+            # which triggers the ERR trap in the subshell due to 'set -E'.
             local matches=()
-            if mapfile -t matches < <(compgen -G "/sys/class/net/$pattern"); then
+            if mapfile -t matches < <(compgen -G "/sys/class/net/$pattern" || true); then
                 : # Matches found
             fi
 
@@ -378,7 +388,7 @@ expand_interfaces() {
 
     # Deduplicate and join with commas
     if [[ ${#expanded_list[@]} -gt 0 ]]; then
-        printf "%s\n" "${expanded_list[@]}" | sort -u | tr '\n' ',' | sed 's/,$//'
+        printf "%s\n" "${expanded_list[@]}" | sort -u | paste -s -d,
     fi
 }
 
@@ -386,7 +396,6 @@ expand_interfaces() {
 # List Generation
 ###################
 
-# Download and process blocklists
 # Download and process blocklists
 download_blocklists() {
     log "INFO" "Downloading blocklists..."
@@ -565,7 +574,8 @@ generate_ip_list() {
         if [[ ${#v6_files[@]} -gt 0 ]]; then
             # iprange does not support IPv6.
             # We concatenate, strip comments/whitespace, and sort unique.
-            grep -h -vE '^\s*#|^\s*$' "${v6_files[@]}" | sed 's/#.*//' | tr -d '\r' | sort -u > "$IP_RANGE_FILE_V6"
+            # Optimized by using a single sed pipeline instead of grep | sed | tr.
+            sed -e 's/#.*//' -e 's/\r//' -e '/^[[:space:]]*$/d' "${v6_files[@]}" | sort -u > "$IP_RANGE_FILE_V6"
         else
             # No files found, create an empty file
             true > "$IP_RANGE_FILE_V6"
@@ -584,7 +594,7 @@ generate_ip_list() {
                  if [[ ${#v6_block_files[@]} -gt 0 ]]; then
                      log "INFO" "Generating IPv6 blocklist from ${#v6_block_files[@]} files..."
                      # Files are already grep-filtered for content, just strip comments (# or ;) /join
-                     grep -h -vE '^\s*#|^\s*$' "${v6_block_files[@]}" | sed 's/[#;].*//' | tr -d '\r' | sort -u > "$IP_RANGE_FILE_BLOCK_V6"
+                     sed -e 's/[#;].*//' -e 's/\r//' -e '/^[[:space:]]*$/d' "${v6_block_files[@]}" | sort -u > "$IP_RANGE_FILE_BLOCK_V6"
                      log "INFO" "IPv6 blocklist created at $IP_RANGE_FILE_BLOCK_V6"
                  else
                      log "INFO" "No blocklist files found (Blocklists enabled but clean dir empty)."
@@ -609,6 +619,15 @@ generate_ip_list() {
 # FIREWALL BACKEND: IPTABLES
 #
 ###############################################################################
+
+# Remove jump from system chain, flush and delete custom chain.
+# Usage: cleanup_iptables_chain <iptables_cmd> <table> <system_chain> <custom_chain>
+cleanup_iptables_chain() {
+    local ipt_cmd="$1" table="$2" sys_chain="$3" custom_chain="$4"
+    while $ipt_cmd -t "$table" -D "$sys_chain" -j "$custom_chain" 2>/dev/null; do :; done
+    $ipt_cmd -t "$table" -F "$custom_chain" 2>/dev/null || true
+    $ipt_cmd -t "$table" -X "$custom_chain" 2>/dev/null || true
+}
 
 # Helper to create/populate an ipset (v4 or v6)
 populate_ipset() {
@@ -640,7 +659,6 @@ populate_ipset() {
 }
 
 # Apply all firewall rules using the legacy iptables backend
-# Apply all firewall rules using the legacy iptables backend
 apply_rules_iptables() {
     log "INFO" "Applying rules using iptables/ipset backend..."
 
@@ -653,26 +671,10 @@ apply_rules_iptables() {
 
     # 2. Cleanup Old Rules (Mangle + Filter + NAT)
     log "INFO" "Cleaning up old iptables rules and chains..."
-
-    # Remove jumps from system chains FIRST
-    # We use 'while' loops to ensure we remove multiple instances if they exist
-    while iptables -t mangle -D PREROUTING -j LABO_PREROUTING 2>/dev/null; do :; done
-    while iptables -D INPUT -j LABO_INPUT 2>/dev/null; do :; done
-    while iptables -D DOCKER-USER -j LABO_DOCKER_USER 2>/dev/null; do :; done
-    while iptables -t nat -D POSTROUTING -j LABO_POSTROUTING 2>/dev/null; do :; done
-
-    # Flush and Delete custom chains
-    iptables -t mangle -F LABO_PREROUTING 2>/dev/null || true
-    iptables -t mangle -X LABO_PREROUTING 2>/dev/null || true
-
-    iptables -t filter -F LABO_INPUT 2>/dev/null || true
-    iptables -t filter -X LABO_INPUT 2>/dev/null || true
-
-    iptables -t filter -F LABO_DOCKER_USER 2>/dev/null || true
-    iptables -t filter -X LABO_DOCKER_USER 2>/dev/null || true
-
-    iptables -t nat -F LABO_POSTROUTING 2>/dev/null || true
-    iptables -t nat -X LABO_POSTROUTING 2>/dev/null || true
+    cleanup_iptables_chain iptables mangle  PREROUTING  LABO_PREROUTING
+    cleanup_iptables_chain iptables filter  INPUT       LABO_INPUT
+    cleanup_iptables_chain iptables filter  DOCKER-USER LABO_DOCKER_USER
+    cleanup_iptables_chain iptables nat     POSTROUTING LABO_POSTROUTING
 
     # 3. Apply IPv4 Rules (Atomic Restore)
     # We use *mangle for PREROUTING (Gatekeeper) and *filter for INPUT/FORWARD protection.
@@ -770,8 +772,13 @@ COMMIT
 :LABO_POSTROUTING - [0:0]
 
 # --- LABO_POSTROUTING Chain (Masquerade) ---
--A LABO_POSTROUTING -o eth+ -j MASQUERADE
--A LABO_POSTROUTING -o en+ -j MASQUERADE
+EOF
+    # Generate masquerade rules from constant
+    for iface in "${NAT_INTERFACES[@]}"; do
+        # iptables uses '+' as wildcard instead of '*'
+        echo "-A LABO_POSTROUTING -o ${iface//\*/+} -j MASQUERADE" >> "$IPTABLES_RULES_FILE"
+    done
+    cat >> "$IPTABLES_RULES_FILE" <<-EOF
 COMMIT
 EOF
 
@@ -798,18 +805,9 @@ EOF
 
             # Cleanup IPv6
             log "INFO" "Cleaning up old ip6tables rules..."
-            while ip6tables -t mangle -D PREROUTING -j LABO_PREROUTING_V6 2>/dev/null; do :; done
-            while ip6tables -D INPUT -j LABO_INPUT_V6 2>/dev/null; do :; done
-            while ip6tables -D DOCKER-USER -j LABO_DOCKER_USER_V6 2>/dev/null; do :; done
-
-            ip6tables -t mangle -F LABO_PREROUTING_V6 2>/dev/null || true
-            ip6tables -t mangle -X LABO_PREROUTING_V6 2>/dev/null || true
-
-            ip6tables -t filter -F LABO_INPUT_V6 2>/dev/null || true
-            ip6tables -t filter -X LABO_INPUT_V6 2>/dev/null || true
-
-            ip6tables -t filter -F LABO_DOCKER_USER_V6 2>/dev/null || true
-            ip6tables -t filter -X LABO_DOCKER_USER_V6 2>/dev/null || true
+            cleanup_iptables_chain ip6tables mangle  PREROUTING  LABO_PREROUTING_V6
+            cleanup_iptables_chain ip6tables filter  INPUT       LABO_INPUT_V6
+            cleanup_iptables_chain ip6tables filter  DOCKER-USER LABO_DOCKER_USER_V6
 
             local IP6TABLES_RULES_FILE="$TEMP_DIR/ip6tables.rules"
             cat > "$IP6TABLES_RULES_FILE" <<-EOF
@@ -890,16 +888,9 @@ EOF
         # Flush if IPv6 GeoBlocking is disabled but backend is iptables
         if command -v ip6tables &>/dev/null; then
              log "INFO" "Flushing IPv6 rules (Geo-blocking disabled)..."
-             while ip6tables -t mangle -D PREROUTING -j LABO_PREROUTING_V6 2>/dev/null; do :; done
-             while ip6tables -D INPUT -j LABO_INPUT_V6 2>/dev/null; do :; done
-             while ip6tables -D DOCKER-USER -j LABO_DOCKER_USER_V6 2>/dev/null; do :; done
-
-             ip6tables -t mangle -F LABO_PREROUTING_V6 2>/dev/null || true
-             ip6tables -t mangle -X LABO_PREROUTING_V6 2>/dev/null || true
-             ip6tables -t filter -F LABO_INPUT_V6 2>/dev/null || true
-             ip6tables -t filter -X LABO_INPUT_V6 2>/dev/null || true
-             ip6tables -t filter -F LABO_DOCKER_USER_V6 2>/dev/null || true
-             ip6tables -t filter -X LABO_DOCKER_USER_V6 2>/dev/null || true
+             cleanup_iptables_chain ip6tables mangle  PREROUTING  LABO_PREROUTING_V6
+             cleanup_iptables_chain ip6tables filter  INPUT       LABO_INPUT_V6
+             cleanup_iptables_chain ip6tables filter  DOCKER-USER LABO_DOCKER_USER_V6
         fi
     fi
 }
@@ -918,35 +909,15 @@ apply_rules_nftables() {
     # This prevents conflicts if switching from iptables to nftables.
     if command -v iptables &>/dev/null; then
         log "INFO" "Cleaning up legacy iptables rules..."
-        # Remove jumps from system chains
-        while iptables -t mangle -D PREROUTING -j LABO_PREROUTING 2>/dev/null; do :; done
-        while iptables -D INPUT -j LABO_INPUT 2>/dev/null; do :; done
-        while iptables -D DOCKER-USER -j LABO_DOCKER_USER 2>/dev/null; do :; done
-
-        # Flush and delete custom chains
-        iptables -t mangle -F LABO_PREROUTING 2>/dev/null || true
-        iptables -t mangle -X LABO_PREROUTING 2>/dev/null || true
-
-        iptables -F LABO_INPUT 2>/dev/null || true
-        iptables -X LABO_INPUT 2>/dev/null || true
-
-        iptables -F LABO_DOCKER_USER 2>/dev/null || true
-        iptables -X LABO_DOCKER_USER 2>/dev/null || true
+        cleanup_iptables_chain iptables mangle  PREROUTING  LABO_PREROUTING
+        cleanup_iptables_chain iptables filter  INPUT       LABO_INPUT
+        cleanup_iptables_chain iptables filter  DOCKER-USER LABO_DOCKER_USER
     fi
     if command -v ip6tables &>/dev/null; then
         log "INFO" "Cleaning up legacy ip6tables rules..."
-        while ip6tables -t mangle -D PREROUTING -j LABO_PREROUTING_V6 2>/dev/null; do :; done
-        while ip6tables -D INPUT -j LABO_INPUT_V6 2>/dev/null; do :; done
-        while ip6tables -D DOCKER-USER -j LABO_DOCKER_USER_V6 2>/dev/null; do :; done
-
-        ip6tables -t mangle -F LABO_PREROUTING_V6 2>/dev/null || true
-        ip6tables -t mangle -X LABO_PREROUTING_V6 2>/dev/null || true
-
-        ip6tables -F LABO_INPUT_V6 2>/dev/null || true
-        ip6tables -X LABO_INPUT_V6 2>/dev/null || true
-
-        ip6tables -F LABO_DOCKER_USER_V6 2>/dev/null || true
-        ip6tables -X LABO_DOCKER_USER_V6 2>/dev/null || true
+        cleanup_iptables_chain ip6tables mangle  PREROUTING  LABO_PREROUTING_V6
+        cleanup_iptables_chain ip6tables filter  INPUT       LABO_INPUT_V6
+        cleanup_iptables_chain ip6tables filter  DOCKER-USER LABO_DOCKER_USER_V6
     fi
 
     # --- Prepare sets (Stream-based approach) ---
@@ -956,8 +927,8 @@ apply_rules_nftables() {
 
     local v4_elements_file="$TEMP_DIR/v4_elements.nft"
     if [[ -s "$IP_RANGE_FILE_V4" ]]; then
-        # Convert newlines to commas, remove trailing comma
-        tr '\n' ',' < "$IP_RANGE_FILE_V4" | sed 's/,$//' > "$v4_elements_file"
+        # Convert newlines to commas
+        paste -s -d, "$IP_RANGE_FILE_V4" > "$v4_elements_file"
     else
         log "WARN" "IPv4 range file is empty. Using dummy IP."
         echo "192.0.2.1" > "$v4_elements_file" # RFC 5737 TEST-NET-1
@@ -969,7 +940,7 @@ apply_rules_nftables() {
         # Process Allowlist
         if [[ -s "$IP_RANGE_FILE_V6" ]]; then
             # Filter valid IPv6 chars only (hex, colon, slash) and join
-            grep -E '^[0-9a-fA-F:/]+$' "$IP_RANGE_FILE_V6" | tr '\n' ',' | sed 's/,$//' > "$v6_elements_file" || true
+            grep -E '^[0-9a-fA-F:/]+$' "$IP_RANGE_FILE_V6" | paste -s -d, > "$v6_elements_file" || true
         fi
         
         # Verify Allowlist is not empty (after filtering), fallback if needed
@@ -981,7 +952,7 @@ apply_rules_nftables() {
         # Process Blocklist
         if [[ -s "$IP_RANGE_FILE_BLOCK_V6" ]]; then
              # Filter valid IPv6 chars only (hex, colon, slash) and join
-            grep -E '^[0-9a-fA-F:/]+$' "$IP_RANGE_FILE_BLOCK_V6" | tr '\n' ',' | sed 's/,$//' > "$v6_block_elements_file" || true
+            grep -E '^[0-9a-fA-F:/]+$' "$IP_RANGE_FILE_BLOCK_V6" | paste -s -d, > "$v6_block_elements_file" || true
         fi
     fi
 
@@ -1169,8 +1140,12 @@ EOF
             # --- POSTROUTING Chain (NAT) ---
             chain POSTROUTING {
                 type nat hook postrouting priority srcnat; policy accept;
-                oifname "eth*" masquerade
-                oifname "en*" masquerade
+EOF
+        # Generate masquerade rules from constant
+        for iface in "${NAT_INTERFACES[@]}"; do
+            echo "                oifname \"$iface\" masquerade"
+        done
+        cat <<EOF
             }  
         }
 EOF
