@@ -24,8 +24,8 @@
 #   -h          Display this help message.
 #
 # Author: LaboDJ
-# Version: 6.4
-# Last Updated: 2025/11/20
+# Version: 6.5
+# Last Updated: 2026/03/19
 ###############################################################################
 
 # Enable strict mode
@@ -45,12 +45,14 @@ SCRIPT_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" &>/dev/null && pwd)
 readonly SCRIPT_DIR
 # Define the output directory for allowed lists
 readonly ALLOW_DIR="$SCRIPT_DIR/lists/allow"
-# Required commands for dependency checks
-readonly REQUIRED_COMMANDS=(curl grep sed tr awk md5sum cut)
+# Required commands for dependency checks (base set; provider-specific added later)
+readonly REQUIRED_COMMANDS=(curl grep sed awk cut)
 # Max concurrent download jobs for parallel processing
 readonly MAX_DOWNLOAD_JOBS=4
+# Maximum download retry attempts (exponential backoff: 2s, 4s, 8s...)
+readonly MAX_DOWNLOAD_RETRIES=5
 # Allowed provider keys
-readonly ALLOWED_PROVIDERS="ipdeny ripe nirsoft"
+declare -ra ALLOWED_PROVIDERS=(ipdeny ripe nirsoft)
 
 ###################
 # Global Variables
@@ -76,8 +78,8 @@ handle_error() {
 # @param $1 Log level (e.g., INFO, WARN, ERROR)
 # @param $2 Log message
 log() {
-    # Prints timestamp, log level, PID, and message to stderr
-    printf '[%s] [%s] [PID:%d] %s\n' "$(date '+%Y-%m-%d %H:%M:%S.%N')" "$1" "$$" "$2" >&2
+    # Uses bash builtin printf '%()T' to avoid date subshell overhead
+    printf '[%(%Y-%m-%d %H:%M:%S)T] [%s] [PID:%d] %s\n' -1 "$1" "$$" "$2" >&2
 }
 export -f log
 
@@ -165,9 +167,18 @@ parse_arguments() {
 ###################
 
 # Verifies that all required external commands are installed.
+# @param $1 (optional) Space-separated list of extra commands to check
 check_dependencies() {
     local missing_commands=()
-    for cmd in "${REQUIRED_COMMANDS[@]}"; do
+    local -a all_commands=("${REQUIRED_COMMANDS[@]}")
+
+    # Append provider-specific commands if requested
+    if [[ -n "${1:-}" ]]; then
+        read -ra extra <<< "$1"
+        all_commands+=("${extra[@]}")
+    fi
+
+    for cmd in "${all_commands[@]}"; do
         command -v "$cmd" >/dev/null 2>&1 || missing_commands+=("$cmd")
     done
 
@@ -189,9 +200,8 @@ download_file() {
     local url="$1"
     local temp_outfile="$2"
     local retries=0
-    local max_retries=5
 
-    while ((retries < max_retries)); do
+    while ((retries < MAX_DOWNLOAD_RETRIES)); do
         # -sSLf: Silent, follow redirects, fail fast on server errors (4xx, 5xx)
         # --connect-timeout 10: Fail if connection is not made in 10s
         # --max-time 30: Fail if the *entire* download takes longer than 30s
@@ -200,12 +210,12 @@ download_file() {
         fi
 
         ((retries++))
-        log "WARN" "Download failed for $url. Retry $retries/$max_retries..."
+        log "WARN" "Download failed for $url. Retry $retries/$MAX_DOWNLOAD_RETRIES..."
         rm -f "$temp_outfile"
         sleep $((2 ** retries)) # Exponential backoff: 2s, 4s, 8s...
     done
 
-    log "ERROR" "Failed to download $url after $max_retries attempts."
+    log "ERROR" "Failed to download $url after $MAX_DOWNLOAD_RETRIES attempts."
     return 1 # Final failure
 }
 export -f download_file
@@ -270,8 +280,7 @@ download_and_validate_simple() {
     fi
 
     # Clean the file: remove comments, blank lines, and DOS carriage returns.
-    sed -i -e '/^#/d' -e '/^$/d' "$temp_outfile"
-    tr -d '\r' < "$temp_outfile" > "$outfile.clean" && mv "$outfile.clean" "$temp_outfile"
+    sed -i -e '/^#/d' -e '/^$/d' -e 's/\r$//' "$temp_outfile"
 
     validate_and_move_generated_file "$temp_outfile" "$outfile" "$proto_name"
 }
@@ -297,8 +306,7 @@ export -f wait_for_job_slot
 # @param $1 The 2-letter uppercase country code (e.g., IT)
 _download_country_ipdeny() {
     local code="$1"
-    local code_lower
-    code_lower=$(echo "$code" | tr '[:upper:]' '[:lower:]')
+    local code_lower="${code,,}"
 
     local V4_URL="https://www.ipdeny.com/ipblocks/data/aggregated/$code_lower-aggregated.zone"
     local V4_OUT_FILE="$ALLOW_DIR/$code_lower.ipdeny.list.v4"
@@ -340,10 +348,6 @@ download_provider_ripe() {
 
     local -r RIPE_URL="https://ftp.ripe.net/pub/stats/ripencc"
     local -r RIPE_FILE="delegated-ripencc-latest"
-    # Create a *shared* temp dir for RIPE.
-    if [[ -z "$TEMP_DIR" ]]; then
-        TEMP_DIR=$(mktemp -d) || die "Failed to create temp dir for RIPE"
-    fi
     local ripe_data_file="$TEMP_DIR/$RIPE_FILE"
     local ripe_md5_file="$TEMP_DIR/$RIPE_FILE.md5"
 
@@ -384,17 +388,16 @@ download_provider_ripe() {
     local -A temp_v6_files
 
     for code in "${ripe_countries[@]}"; do
-        local code_lower
-        code_lower=$(echo "$code" | tr '[:upper:]' '[:lower:]')
-        
+        local code_lower="${code,,}"
+
         local v4_out="$ALLOW_DIR/$code_lower.ripe.list.v4"
         local v6_out="$ALLOW_DIR/$code_lower.ripe.list.v6"
         local temp_v4="$v4_out.tmp"
         local temp_v6="$v6_out.tmp"
 
         # Ensure temp files are empty/exist
-        true > "$temp_v4"
-        true > "$temp_v6"
+        : > "$temp_v4"
+        : > "$temp_v6"
 
         temp_v4_files[$code]="$temp_v4"
         temp_v6_files[$code]="$temp_v6"
@@ -458,8 +461,7 @@ download_provider_ripe() {
 
     # 5. Validate and move all generated files
     for code in "${ripe_countries[@]}"; do
-        local code_lower
-        code_lower=$(echo "$code" | tr '[:upper:]' '[:lower:]')
+        local code_lower="${code,,}"
         local v4_out="$ALLOW_DIR/$code_lower.ripe.list.v4"
         local v6_out="$ALLOW_DIR/$code_lower.ripe.list.v6"
         
@@ -479,8 +481,7 @@ download_provider_ripe() {
 # @param $1 The 2-letter uppercase country code (e.g., IT)
 _download_country_nirsoft() {
     local code="$1"
-    local code_lower
-    code_lower=$(echo "$code" | tr '[:upper:]' '[:lower:]')
+    local code_lower="${code,,}"
     local V4_OUT_FILE="$ALLOW_DIR/$code_lower.nirsoft.list.v4"
     local V6_OUT_FILE="$ALLOW_DIR/$code_lower.nirsoft.list.v6"
     local TEMP_V4_OUT_FILE="$V4_OUT_FILE.tmp"
@@ -488,10 +489,6 @@ _download_country_nirsoft() {
     local URL="https://www.nirsoft.net/countryip/$code_lower.csv"
     local temp_csv_file
 
-    # We need a temp dir to store the downloaded CSV
-    if [[ -z "$TEMP_DIR" ]]; then
-        TEMP_DIR=$(mktemp -d) || die "Failed to create temp dir for Nirsoft"
-    fi
     temp_csv_file=$(mktemp --tmpdir="$TEMP_DIR") || die "Failed to create temp file"
 
     log "INFO" "Downloading $list_name CSV from $URL"
@@ -544,51 +541,64 @@ main() {
     # 3. Create the output directory
     mkdir -p "$ALLOW_DIR" || die "Failed to create directory: $ALLOW_DIR"
 
-    # 4. Clean up any lists from a previous run
+    # 4. Create shared temp directory for providers that need it (RIPE, Nirsoft)
+    TEMP_DIR=$(mktemp -d) || die "Failed to create temp directory"
+
+    # 5. Clean up any lists from a previous run
     log "INFO" "Cleaning old downloaded lists from $ALLOW_DIR"
     rm -f "$ALLOW_DIR"/*.list.v4
     rm -f "$ALLOW_DIR"/*.list.v6
 
-    # 5. Parse the new syntax
+    # 6. Parse the new syntax
     log "INFO" "Parsing provider/country syntax: $ALLOWED_COUNTRIES_SYNTAX"
 
     # Use an associative array to map providers to their country lists
     declare -A provider_country_map
 
-    # Convert semicolons to newlines for safe looping
-    local provider_groups
-    provider_groups=$(echo "$ALLOWED_COUNTRIES_SYNTAX" | tr ';' '\n')
+    # Split on semicolons using parameter expansion (no subshell)
+    local -a provider_groups
+    IFS=';' read -ra provider_groups <<< "$ALLOWED_COUNTRIES_SYNTAX"
 
-    while IFS= read -r group; do
-        [[ -n "$group" ]] || continue # Skip empty lines
+    for group in "${provider_groups[@]}"; do
+        [[ -n "$group" ]] || continue # Skip empty entries
 
-        # Split "provider:C1,C2"
-        local provider_name
-        local country_list_csv
-        provider_name=$(echo "$group" | cut -d':' -f1 | tr '[:upper:]' '[:lower:]' | tr -d '[:space:]')
-        country_list_csv=$(echo "$group" | cut -d':' -f2-) # Get everything after the first colon
+        # Split "provider:C1,C2" using parameter expansion
+        local provider_name="${group%%:*}"
+        provider_name="${provider_name,,}"          # lowercase
+        provider_name="${provider_name// /}"         # strip spaces
+        local country_list_csv="${group#*:}"         # everything after first colon
 
-        # Validate provider
-        if ! [[ " $ALLOWED_PROVIDERS " == *" $provider_name "* ]]; then
-            die "Invalid provider '$provider_name' in syntax. Allowed: $ALLOWED_PROVIDERS"
+        # Validate provider against array
+        local valid=false
+        for p in "${ALLOWED_PROVIDERS[@]}"; do
+            [[ "$p" == "$provider_name" ]] && { valid=true; break; }
+        done
+        if ! "$valid"; then
+            die "Invalid provider '$provider_name' in syntax. Allowed: ${ALLOWED_PROVIDERS[*]}"
         fi
 
         # Sanitize country list: uppercase, remove spaces, convert comma to space
-        local sanitized_countries
-        sanitized_countries=$(echo "$country_list_csv" | tr '[:lower:]' '[:upper:]' | tr -d '[:space:]' | tr ',' ' ')
+        local sanitized_countries="${country_list_csv^^}" # uppercase
+        sanitized_countries="${sanitized_countries// /}"  # strip spaces
+        sanitized_countries="${sanitized_countries//,/ }" # comma → space
 
         # Append to the map (handles a provider being listed multiple times)
         provider_country_map[$provider_name]+="$sanitized_countries "
 
-    done <<< "$provider_groups"
+    done
 
-    # 6. Dispatch to the correct provider functions
+    # 7. Check for RIPE-specific dependencies if needed
+    if [[ -n "${provider_country_map[ripe]:-}" ]]; then
+        check_dependencies "md5sum"
+    fi
+
+    # 8. Dispatch to the correct provider functions
     for provider in "${!provider_country_map[@]}"; do
         # Create a clean array of unique country codes for this provider
         local -a country_array
-        # Use 'tr' to convert spaces to newlines, 'sort -u' for uniqueness,
-        # and 'read' to build the final array.
-        mapfile -t country_array < <(echo "${provider_country_map[$provider]}" | tr ' ' '\n' | grep . | sort -u)
+        # Word-split the space-separated codes (safe: sanitized uppercase, no spaces),
+        # output one per line for sort -u, then build the final array.
+        mapfile -t country_array < <(printf '%s\n' ${provider_country_map[$provider]} | sort -u)
 
         [[ ${#country_array[@]} -gt 0 ]] || continue # Skip if no countries
 
@@ -615,7 +625,7 @@ main() {
         esac
     done
 
-    # 7. Final Validation
+    # 9. Final Validation
     # This is a critical safety net. If *all* downloads failed
     # (e.g., provider is down, no internet), we must abort.
     log "INFO" "Final check for generated lists..."
