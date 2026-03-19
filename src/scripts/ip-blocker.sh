@@ -38,8 +38,8 @@
 #   -h             Display this help message.
 #
 # Author: LaboDJ
-# Version: 5.5
-# Last Updated: 2026/02/27
+# Version: 5.6
+# Last Updated: 2026/03/19
 ###############################################################################
 
 # Enable strict mode:
@@ -58,7 +58,7 @@ set -Eeuo pipefail
 declare -r DEFAULT_COUNTRIES="IT"
 # Get the script's absolute directory
 SCRIPT_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" &>/dev/null && pwd)
-readonly SCRIPT_DIR
+declare -r SCRIPT_DIR
 # Path to the downloader script
 declare -r COUNTRY_IPS_DOWNLOADER="$SCRIPT_DIR/geo_ip_downloader.sh"
 # Directory structure
@@ -78,9 +78,9 @@ declare -r BLOCK_LIST_NAME_V6="blocklist_v6"
 # Geo-IP Provider settings
 # Default provider if -p is not used
 declare -r DEFAULT_PROVIDER="ipdeny"
-declare -r ALLOWED_PROVIDERS="ipdeny ripe nirsoft"
+declare -ra ALLOWED_PROVIDERS=(ipdeny ripe nirsoft)
 # Max retries for downloader
-declare -r MAX_RETRIES=10
+declare -r MAX_RETRIES=3
 # Sites to test connectivity
 declare -r CONNECTIVITY_CHECK_SITES=(github.com google.com)
 # Lock directory for singleton execution
@@ -147,8 +147,8 @@ setup_signal_handlers() {
 
 # Standardized logging function
 log() {
-    # Prints timestamp, log level, PID, and message to stderr
-    printf '[%s] [%s] [PID:%d] %s\n' "$(date '+%Y-%m-%d %H:%M:%S.%N')" "$1" "$$" "$2" >&2
+    # Uses printf builtin %()T for timestamp (no subshell, no external process)
+    printf '[%(%Y-%m-%d %H:%M:%S)T] [%s] [PID:%d] %s\n' -1 "$1" "$$" "$2" >&2
 }
 
 # Log an error and exit
@@ -195,7 +195,12 @@ setup_temp_dir_and_traps() {
                 fi
             fi
         else
-             die "Failed to acquire lock directory: $LOCK_DIR"
+            # No PID file: lock is stale (e.g. SIGKILL during setup). Remove and retry.
+            log "WARN" "Lock exists without PID file. Assuming stale, removing."
+            rm -rf "$LOCK_DIR"
+            if ! mkdir "$LOCK_DIR" 2>/dev/null; then
+                die "Failed to acquire lock after removing stale lock (concurrent start?)."
+            fi
         fi
     fi
     # Write our PID to the lock
@@ -244,8 +249,7 @@ parse_arguments() {
       log "WARN" "No arguments provided. Using defaults (Countries: $DEFAULT_COUNTRIES)."
     fi
     OPTIND=1
-    local OPTERR=1
-
+    # getopts is in silent mode (optstring starts with ':'), OPTERR is irrelevant
     # New loop includes '-G' and '-p'
     while getopts ":c:p:bs:i:hG" opt; do
         case $opt in
@@ -275,14 +279,16 @@ parse_arguments() {
         fi
     else
         # Simple syntax (e.g., "IT,FR,DE")
-        if [[ ! "$ALLOWED_COUNTRIES" =~ ^[A-Za-z,]+$ ]]; then
-            die "Country codes must be letters and comma-separated (e.g., IT,fr,DE)"
+        if [[ ! "$ALLOWED_COUNTRIES" =~ ^[A-Za-z]{2}(,[A-Za-z]{2})*$ ]]; then
+            die "Country codes must be 2-letter ISO codes, comma-separated (e.g., IT,FR,DE)"
         fi
     fi
-    # Validate provider using a robust glob match
-    if ! [[ " $ALLOWED_PROVIDERS " == *"$GEO_IP_PROVIDER"* ]]; then
-        die "Invalid provider '$GEO_IP_PROVIDER'. Allowed providers are: $ALLOWED_PROVIDERS"
-    fi
+    # Validate provider against known providers array
+    local _valid_provider=false
+    for _p in "${ALLOWED_PROVIDERS[@]}"; do
+        [[ "$GEO_IP_PROVIDER" == "$_p" ]] && _valid_provider=true && break
+    done
+    [[ "$_valid_provider" == true ]] || die "Invalid provider '$GEO_IP_PROVIDER'. Allowed: ${ALLOWED_PROVIDERS[*]}"
     log "INFO" "Using Geo-IP provider: $GEO_IP_PROVIDER"
 }
 
@@ -340,21 +346,21 @@ check_installed_commands() {
 
 retry_command() {
     local retries=0
-    local command=("$@")
+    local -a cmd=("$@")
 
     while ((retries < MAX_RETRIES)); do
         # Use an 'if' statement to prevent 'set -e' from exiting the script
         # if the command fails, allowing the loop to handle the error.
-        if "${command[@]}"; then
+        if "${cmd[@]}"; then
             return 0 # Success
         fi
 
         ((retries++))
-        log "WARN" "Command failed: ${command[*]}. Retry $retries/$MAX_RETRIES"
-        sleep $((2 ** retries)) # 2s, 4s, 8s, 16s...
+        log "WARN" "Command failed: ${cmd[*]}. Retry $retries/$MAX_RETRIES"
+        sleep $((2 ** retries)) # 2s, 4s, 8s
     done
 
-    die "Command failed after $MAX_RETRIES retries: ${command[*]}"
+    die "Command failed after $MAX_RETRIES retries: ${cmd[*]}"
 }
 
 # Helper to expand interface wildcards (e.g. "eth0 br-*")
@@ -369,9 +375,7 @@ expand_interfaces() {
             # We append '|| true' because if no matches are found, compgen returns 1,
             # which triggers the ERR trap in the subshell due to 'set -E'.
             local matches=()
-            if mapfile -t matches < <(compgen -G "/sys/class/net/$pattern" || true); then
-                : # Matches found
-            fi
+            mapfile -t matches < <(compgen -G "/sys/class/net/$pattern" 2>/dev/null || true)
 
             for match in "${matches[@]}"; do
                 expanded_list+=("$(basename "$match")")
@@ -410,12 +414,12 @@ download_blocklists() {
     local urls=()
 
     # 1. Download and parse remote git index (v4 lists)
-    retry_command curl -fsSL --connect-timeout 10 --max-time 30 "$BLOCK_LIST_URL" -o "$BLOCK_LIST_FILE_NAME" ||
-        die "Failed to download block list index"
+    # retry_command already calls die on exhausted retries
+    retry_command curl -fsSL --connect-timeout 10 --max-time 30 "$BLOCK_LIST_URL" -o "$BLOCK_LIST_FILE_NAME"
 
     while IFS= read -r line; do
         [[ -z "$line" || "${line:0:1}" == "#" ]] && continue
-        line=$(echo "$line" | tr -d '\r')
+        line="${line//$'\r'/}"
         urls+=("$line")
     done < "$BLOCK_LIST_FILE_NAME"
 
@@ -424,7 +428,7 @@ download_blocklists() {
         log "INFO" "Adding manual blocklists from $MANUAL_BLOCK_LIST"
         while IFS= read -r line; do
             [[ -z "$line" || "${line:0:1}" == "#" ]] && continue
-            line=$(echo "$line" | tr -d '\r')
+            line="${line//$'\r'/}"
             urls+=("$line")
         done < "$MANUAL_BLOCK_LIST"
     else
@@ -490,7 +494,7 @@ separate_ip_families() {
 
         # Sanity Check: validation for HTML/XML content (e.g. Captive Portal / 404 Page)
         # We check the first 20 lines for common HTML tags.
-        if head -n 20 "$file" | grep -qilE "<!DOCTYPE|<html|<head|<body"; then
+        if head -n 20 "$file" | grep -qiE "<!DOCTYPE|<html|<head|<body"; then
              log "WARN" "File '$filename' appears to be HTML/XML (invalid content). Skipping."
              continue
         fi
@@ -518,6 +522,10 @@ separate_ip_families() {
 generate_ip_list() {
     log "INFO" "Generating optimized IP range lists..."
 
+    # Enable nullglob for safe glob expansion; restored on function return via trap
+    shopt -s nullglob
+    trap 'shopt -u nullglob' RETURN
+
     [[ -f "$COUNTRY_IPS_DOWNLOADER" && -x "$COUNTRY_IPS_DOWNLOADER" ]] || die "$COUNTRY_IPS_DOWNLOADER script not found/executable"
 
     # Define our optimizer command for IPv4.
@@ -535,19 +543,12 @@ generate_ip_list() {
     fi
     retry_command "$COUNTRY_IPS_DOWNLOADER" -c "$downloader_countries_arg"
 
-    cd "$IP_LIST_DIR" || die "Failed to change directory to $IP_LIST_DIR"
-
     # --- Optimize IPv4 List ---
-    # We now look at ALLOW lists (glob) AND the Cleaned Blocklists (dir content)
-    
     local v4_files=("$ALLOW_LIST_DIR"/*.v4)
     local v4_block_files=()
-    
+
     if [[ "$USE_BLOCKLIST" == true && -n "$BLOCK_LIST_CLEAN_V4_DIR" ]]; then
-        # Separate function populated BLOCK_LIST_CLEAN_V4_DIR
-        shopt -s nullglob
         v4_block_files=("$BLOCK_LIST_CLEAN_V4_DIR"/*)
-        shopt -u nullglob
     fi
 
     if [[ ${#v4_block_files[@]} -gt 0 ]]; then
@@ -562,56 +563,42 @@ generate_ip_list() {
     [[ -s "$IP_RANGE_FILE_V4" ]] || die "IPv4 range file $IP_RANGE_FILE_V4 not found or empty. Aborting."
     log "INFO" "IPv4 range list created at $IP_RANGE_FILE_V4"
 
-    # --- Generate IPv6 List (with cat + sort) ---
-    if [[ "$GEOBLOCK_IPV6" == true ]]; then
-        log "INFO" "Combining and de-duplicating IPv6 allow lists..."
-
-        # Use nullglob to safely handle cases where no .v6 files exist.
-        shopt -s nullglob
-        local v6_files=("$ALLOW_LIST_DIR"/*.v6)
-        shopt -u nullglob
-
-        if [[ ${#v6_files[@]} -gt 0 ]]; then
-            # iprange does not support IPv6.
-            # We concatenate, strip comments/whitespace, and sort unique.
-            # Optimized by using a single sed pipeline instead of grep | sed | tr.
-            sed -e 's/#.*//' -e 's/\r//' -e '/^[[:space:]]*$/d' "${v6_files[@]}" | sort -u > "$IP_RANGE_FILE_V6"
-        else
-            # No files found, create an empty file
-            true > "$IP_RANGE_FILE_V6"
-        fi
-
-        if [[ ! -s "$IP_RANGE_FILE_V6" ]]; then
-             log "WARN" "IPv6 range file $IP_RANGE_FILE_V6 is empty. IPv6 Geo-IP will not be active."
-        else
-             log "INFO" "IPv6 range list created at $IP_RANGE_FILE_V6"
-             if [[ "$USE_BLOCKLIST" == true && -n "$BLOCK_LIST_CLEAN_V6_DIR" ]]; then
-                 # Use cleaned v6 block files
-                 shopt -s nullglob
-                 local v6_block_files=("$BLOCK_LIST_CLEAN_V6_DIR"/*)
-                 shopt -u nullglob
-                 
-                 if [[ ${#v6_block_files[@]} -gt 0 ]]; then
-                     log "INFO" "Generating IPv6 blocklist from ${#v6_block_files[@]} files..."
-                     # Files are already grep-filtered for content, just strip comments (# or ;) /join
-                     sed -e 's/[#;].*//' -e 's/\r//' -e '/^[[:space:]]*$/d' "${v6_block_files[@]}" | sort -u > "$IP_RANGE_FILE_BLOCK_V6"
-                     log "INFO" "IPv6 blocklist created at $IP_RANGE_FILE_BLOCK_V6"
-                 else
-                     log "INFO" "No blocklist files found (Blocklists enabled but clean dir empty)."
-                fi
-             else
-                 if [[ "$USE_BLOCKLIST" == true ]]; then
-                    log "INFO" "No blocklist files to process."
-                 fi
-             fi
-        fi
-    else
+    # --- Generate IPv6 List ---
+    if [[ "$GEOBLOCK_IPV6" != true ]]; then
         log "INFO" "IPv6 Geo-blocking is disabled (Default). Skipping v6 list generation."
-        # Ensure we don't leave stale files if the user toggled the flag
         rm -f "$IP_RANGE_FILE_V6"
+        return
     fi
 
-    cd "$SCRIPT_DIR" # Go back to base dir
+    log "INFO" "Combining and de-duplicating IPv6 allow lists..."
+    local v6_files=("$ALLOW_LIST_DIR"/*.v6)
+
+    if [[ ${#v6_files[@]} -gt 0 ]]; then
+        # iprange does not support IPv6.
+        # Concatenate, strip comments/whitespace, and sort unique.
+        sed -e 's/#.*//' -e 's/\r//' -e '/^[[:space:]]*$/d' "${v6_files[@]}" | sort -u > "$IP_RANGE_FILE_V6"
+    else
+        : > "$IP_RANGE_FILE_V6"
+    fi
+
+    if [[ ! -s "$IP_RANGE_FILE_V6" ]]; then
+        log "WARN" "IPv6 range file $IP_RANGE_FILE_V6 is empty. IPv6 Geo-IP will not be active."
+        return
+    fi
+
+    log "INFO" "IPv6 range list created at $IP_RANGE_FILE_V6"
+
+    # Generate IPv6 blocklist if enabled and available
+    if [[ "$USE_BLOCKLIST" == true && -n "$BLOCK_LIST_CLEAN_V6_DIR" ]]; then
+        local v6_block_files=("$BLOCK_LIST_CLEAN_V6_DIR"/*)
+        if [[ ${#v6_block_files[@]} -gt 0 ]]; then
+            log "INFO" "Generating IPv6 blocklist from ${#v6_block_files[@]} files..."
+            sed -e 's/[#;].*//' -e 's/\r//' -e '/^[[:space:]]*$/d' "${v6_block_files[@]}" | sort -u > "$IP_RANGE_FILE_BLOCK_V6"
+            log "INFO" "IPv6 blocklist created at $IP_RANGE_FILE_BLOCK_V6"
+        else
+            log "INFO" "No IPv6 blocklist files found (clean dir empty)."
+        fi
+    fi
 }
 
 ###############################################################################
@@ -650,9 +637,8 @@ populate_ipset() {
     echo "create $set_name hash:net family $family -exist" > "$IPSET_RESTORE_FILE"
     echo "flush $set_name" >> "$IPSET_RESTORE_FILE"
 
-    while IFS= read -r line; do
-        echo "add $set_name $line" >> "$IPSET_RESTORE_FILE"
-    done <"$range_file"
+    # Use sed for bulk processing instead of slow while-read loop
+    sed "s/^/add $set_name /" "$range_file" >> "$IPSET_RESTORE_FILE"
 
     $set_cmd restore < "$IPSET_RESTORE_FILE" || die "Failed to restore $set_cmd set"
     log "INFO" "$set_cmd set '$set_name' populated."
@@ -1041,8 +1027,8 @@ EOF
 
             # --- PREROUTING Chain (Main Gatekeeper) ---
             # Filters *ALL* incoming traffic (Host + Forward) at the earliest point.
-            # Priority -2 (Mangle) is chosen to drop bad traffic BEFORE connection tracking (priority -200)
-            # or other expensive operations, saving CPU.
+            # Priority mangle-2 (-152): runs AFTER conntrack (-200) so ct state is available,
+            # but before any other mangle hooks that might interfere.
             chain GEOIP_PREROUTING {
                 type filter hook prerouting priority mangle -2; policy accept;
 
@@ -1066,15 +1052,18 @@ EOF
                 # 4. Geo-IP v4 Filter (DROP)
                 #    Drop all NEW traffic that is NOT in the allowlist.
                 #    We use a 'set' for O(1) performance regardless of list size.
-                ip saddr != @$ALLOW_LIST_NAME_V4 counter log prefix "PREROUTING GEO-DROP: " drop
+                ip saddr != @$ALLOW_LIST_NAME_V4 limit rate 30/minute burst 10 packets log prefix "PREROUTING GEO-DROP: "
+                ip saddr != @$ALLOW_LIST_NAME_V4 counter drop
 
                 # 5. Geo-IP v6 Filter (DROP, if enabled)
 EOF
         if [[ "$GEOBLOCK_IPV6" == true ]]; then
              if [[ -s "$v6_block_elements_file" ]]; then
-                 echo '                ip6 saddr @'"$BLOCK_LIST_NAME_V6"' counter log prefix "PREROUTING6 BLOCK-DROP: " drop'
+                 echo '                ip6 saddr @'"$BLOCK_LIST_NAME_V6"' limit rate 30/minute burst 10 packets log prefix "PREROUTING6 BLOCK-DROP: "'
+                 echo '                ip6 saddr @'"$BLOCK_LIST_NAME_V6"' counter drop'
              fi
-            echo '                ip6 nexthdr != icmpv6 ip6 saddr != @'"$ALLOW_LIST_NAME_V6"' counter log prefix "PREROUTING6 GEO-DROP: " drop'
+            echo '                ip6 nexthdr != icmpv6 ip6 saddr != @'"$ALLOW_LIST_NAME_V6"' limit rate 30/minute burst 10 packets log prefix "PREROUTING6 GEO-DROP: "'
+            echo '                ip6 nexthdr != icmpv6 ip6 saddr != @'"$ALLOW_LIST_NAME_V6"' counter drop'
         fi
         cat <<EOF
             }
