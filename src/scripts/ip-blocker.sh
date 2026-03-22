@@ -81,10 +81,18 @@ declare -r DEFAULT_PROVIDER="ipdeny"
 declare -ra ALLOWED_PROVIDERS=(ipdeny ripe nirsoft)
 # Max retries for downloader
 declare -r MAX_RETRIES=3
-# Sites to test connectivity
+# Sites to test connectivity (DNS resolution + TCP, via curl HEAD)
 declare -r CONNECTIVITY_CHECK_SITES=(github.com google.com)
+# How long to wait for DNS/network to come up (seconds). Relevant at boot.
+declare -r CONNECTIVITY_MAX_WAIT=120
+# Interval between connectivity retries (seconds)
+declare -r CONNECTIVITY_RETRY_INTERVAL=10
 # Lock directory for singleton execution
 declare -r LOCK_DIR="/var/run/ip-blocker.lock"
+# RFC 1918 private IPv4 ranges — used in both nftables sets and iptables rules.
+declare -ra PRIVATE_NETS_V4=("10.0.0.0/8" "172.16.0.0/12" "192.168.0.0/16")
+# Link-local, ULA, and multicast IPv6 ranges — must always bypass Geo-IP.
+declare -ra PRIVATE_NETS_V6=("fe80::/10" "fc00::/7" "ff00::/8")
 # Interfaces used for POSTROUTING masquerade (NAT).
 # Wildcards are expanded by the firewall backend:
 #   nftables: oifname "eth*"    (native glob, safe if iface doesn't exist)
@@ -223,8 +231,10 @@ setup_temp_dir_and_traps() {
 # Argument Parsing
 ###################
 
-# Display usage information
+# Display usage information. Accepts an optional exit code (default: 1).
+# Pass 0 when invoked via -h; pass 1 (default) for invalid-option paths.
 print_usage() {
+    local exit_code="${1:-1}"
     cat <<EOF
 
 Usage: $0 [-c countries] [-p provider] [-b] [-G] [-s sshPort] [-i interfaces] [-h]
@@ -240,7 +250,7 @@ Options:
     -i interfaces  Interfaces for Flowtable offload (e.g. "eth0 wg0 br-*")
     -h             Display this help message
 EOF
-    exit 1
+    exit "$exit_code"
 }
 
 # Parse command line arguments using getopts
@@ -249,17 +259,17 @@ parse_arguments() {
       log "WARN" "No arguments provided. Using defaults (Countries: $DEFAULT_COUNTRIES)."
     fi
     OPTIND=1
-    # getopts is in silent mode (optstring starts with ':'), OPTERR is irrelevant
-    # New loop includes '-G' and '-p'
+    # Silent mode (optstring starts with ':'): unknown opts land in '?' case,
+    # missing args land in ':' case — OPTERR is ignored.
     while getopts ":c:p:bs:i:hG" opt; do
         case $opt in
         c) ALLOWED_COUNTRIES="$OPTARG" ;;
         p) GEO_IP_PROVIDER="$OPTARG" ;;
         b) USE_BLOCKLIST=true ;;
-        G) GEOBLOCK_IPV6=true ;; # Set IPv6 blocking to opt-in
+        G) GEOBLOCK_IPV6=true ;;
         s) SSH_PORT="$OPTARG" ;;
         i) FLOWTABLE_INTERFACES="$OPTARG" ;;
-        h) print_usage ;;
+        h) print_usage 0 ;;
         \?) log "ERROR" "Invalid option: -$OPTARG"; print_usage ;;
         :) log "ERROR" "The option -$OPTARG requires an argument"; print_usage ;;
         esac
@@ -269,6 +279,10 @@ parse_arguments() {
     if [[ ! "$SSH_PORT" =~ ^[0-9]+$ ]] || [ "$SSH_PORT" -lt 1 ] || [ "$SSH_PORT" -gt 65535 ]; then
         die "SSH port must be a number between 1 and 65535"
     fi
+    # Normalize: strip any trailing separators the user may have left (e.g. "ipdeny:IT;")
+    ALLOWED_COUNTRIES="${ALLOWED_COUNTRIES%%;}"
+    ALLOWED_COUNTRIES="${ALLOWED_COUNTRIES%%,}"
+
     # Validate country codes based on syntax
     if [[ "$ALLOWED_COUNTRIES" == *":"* ]]; then
         # Advanced syntax (e.g., "ripe:IT,FR;ipdeny:CN")
@@ -296,16 +310,33 @@ parse_arguments() {
 # System & Network Checks
 ###################
 
-# Check for internet connectivity before attempting downloads
+# Check for internet connectivity before attempting downloads.
+# Uses curl (not ping) to test both DNS resolution AND TCP/HTTPS reachability.
+# Ping can succeed from kernel-cached routes while the DNS resolver is still starting
+# Retries for up to CONNECTIVITY_MAX_WAIT seconds to give DNS time to come up.
 check_connectivity() {
-    log "INFO" "Checking connectivity..."
-    for site in "${CONNECTIVITY_CHECK_SITES[@]}"; do
-        if ping -c 1 -W 5 "$site" &>/dev/null; then
-            log "INFO" "Connectivity check passed with $site"
-            return 0
+    log "INFO" "Checking connectivity (DNS + TCP, up to ${CONNECTIVITY_MAX_WAIT}s)..."
+    local elapsed=0
+
+    while ((elapsed < CONNECTIVITY_MAX_WAIT)); do
+        for site in "${CONNECTIVITY_CHECK_SITES[@]}"; do
+            # -f: fail on HTTP error  --head: no body download
+            # --connect-timeout: abort if TCP handshake takes > 5s
+            # --max-time: hard cap on the entire request
+            if curl -fsSL --head --connect-timeout 5 --max-time 10 "https://$site" >/dev/null 2>&1; then
+                log "INFO" "Connectivity check passed ($site, ${elapsed}s after start)"
+                return 0
+            fi
+        done
+
+        ((elapsed += CONNECTIVITY_RETRY_INTERVAL))
+        if ((elapsed < CONNECTIVITY_MAX_WAIT)); then
+            log "WARN" "DNS/network not ready. Retrying in ${CONNECTIVITY_RETRY_INTERVAL}s... (${elapsed}s/${CONNECTIVITY_MAX_WAIT}s)"
+            sleep "$CONNECTIVITY_RETRY_INTERVAL"
         fi
     done
-    die "Connectivity check failed. Please check network connection."
+
+    die "Connectivity check failed after ${CONNECTIVITY_MAX_WAIT}s. DNS or network unavailable."
 }
 
 # Detects the best available firewall backend (nftables or iptables)
@@ -313,7 +344,7 @@ detect_backend() {
     log "INFO" "Detecting firewall backend..."
     if command -v nft &>/dev/null; then
         FIREWALL_BACKEND="nftables"
-        REQUIRED_COMMANDS=(curl iprange ping nft)
+        REQUIRED_COMMANDS=(curl iprange nft)
         log "INFO" "Backend selected: nftables (native)"
 
         # Pre-flight check: Verify nftables functionality
@@ -325,7 +356,7 @@ detect_backend() {
     elif command -v iptables &>/dev/null && command -v ipset &>/dev/null; then
         FIREWALL_BACKEND="iptables"
         # Dynamically add IPv6 tools only if needed
-        REQUIRED_COMMANDS=(curl ipset iptables iprange ping iptables-restore)
+        REQUIRED_COMMANDS=(curl ipset iptables iprange iptables-restore)
         if [[ "$GEOBLOCK_IPV6" == true ]]; then
              REQUIRED_COMMANDS+=(ip6tables ip6tables-restore)
         fi
@@ -361,6 +392,26 @@ retry_command() {
     done
 
     die "Command failed after $MAX_RETRIES retries: ${cmd[*]}"
+}
+
+# Like retry_command but returns 1 instead of calling die on exhausted retries.
+# Use for optional/degradable operations (e.g. blocklist download) where the
+# caller decides whether failure is fatal.
+try_command() {
+    local retries=0
+    local -a cmd=("$@")
+
+    while ((retries < MAX_RETRIES)); do
+        if "${cmd[@]}"; then
+            return 0
+        fi
+        ((retries++))
+        log "WARN" "Command failed: ${cmd[*]}. Retry $retries/$MAX_RETRIES"
+        sleep $((2 ** retries))
+    done
+
+    log "WARN" "Command failed after $MAX_RETRIES retries (non-fatal): ${cmd[*]}"
+    return 1
 }
 
 # Helper to expand interface wildcards (e.g. "eth0 br-*")
@@ -404,18 +455,24 @@ expand_interfaces() {
 download_blocklists() {
     log "INFO" "Downloading blocklists..."
 
-    # Export functions so they are available in the subshells
-    # launched with '&' for parallel downloads.
-    export -f retry_command
-    export -f die
+    # Only 'log' is needed in '& ' subshells; retry_command/die are not called there.
     export -f log
 
     local max_jobs=8
     local urls=()
 
-    # 1. Download and parse remote git index (v4 lists)
-    # retry_command already calls die on exhausted retries
-    retry_command curl -fsSL --connect-timeout 10 --max-time 30 "$BLOCK_LIST_URL" -o "$BLOCK_LIST_FILE_NAME"
+    # 1. Download and parse remote git index (v4 lists).
+    # Non-fatal on network failure: fall back to the cached index from the previous
+    # run (which lives at BLOCK_LIST_FILE_NAME on disk). Only return 1 if the index
+    # is unreachable AND no cached copy exists.
+    if ! try_command curl -fsSL --connect-timeout 10 --max-time 30 "$BLOCK_LIST_URL" -o "$BLOCK_LIST_FILE_NAME"; then
+        if [[ -f "$BLOCK_LIST_FILE_NAME" ]]; then
+            log "WARN" "Blocklist index unreachable; using cached index from previous run."
+        else
+            log "WARN" "Blocklist index unreachable and no cached index found. Skipping blocklists."
+            return 1
+        fi
+    fi
 
     while IFS= read -r line; do
         [[ -z "$line" || "${line:0:1}" == "#" ]] && continue
@@ -432,32 +489,64 @@ download_blocklists() {
             urls+=("$line")
         done < "$MANUAL_BLOCK_LIST"
     else
-         log "WARN" "Manual blocklist file not found: $MANUAL_BLOCK_LIST. Proceeding with repo lists only."
+        log "WARN" "Manual blocklist file not found: $MANUAL_BLOCK_LIST. Proceeding with repo lists only."
     fi
 
-    # 3. Download ALL Lists to the main block list directory
-    cd "$BLOCK_LIST_DIR" || die "Failed to change directory to $BLOCK_LIST_DIR"
-    rm -f ./*
-
+    # 3. Download ALL Lists into a staging directory (inside TEMP_DIR).
+    # Atomic strategy: download to staging first, then replace BLOCK_LIST_DIR only
+    # if at least one file arrived. This preserves cached files from the previous
+    # run as a fallback if all downloads fail (e.g. all sources unreachable).
     log "INFO" "Dispatching ${#urls[@]} downloads..."
+    local staging_dir="$TEMP_DIR/bl_staging"
+    mkdir -p "$staging_dir"
 
-    for url in "${urls[@]}"; do
-        # Wait for a job to finish if we are at the max
-        while (($(jobs -p | wc -l) >= max_jobs)); do
-            wait -n || true
+    (
+        cd "$staging_dir" || die "Failed to change directory to $staging_dir"
+        for url in "${urls[@]}"; do
+            # Throttle: wait for a slot before spawning the next job
+            while (($(jobs -p | wc -l) >= max_jobs)); do
+                wait -n || true
+            done
+            (
+                log "INFO" "Downloading: $url"
+                # Capture curl stderr so errors appear in our structured log format
+                # instead of raw lines that journald may split across entries.
+                local curl_err
+                if ! curl_err=$(curl -fsSL -OJ --connect-timeout 15 --max-time 90 "$url" 2>&1); then
+                    log "WARN" "Failed to download $url: ${curl_err%%$'\n'*}"
+                fi
+            ) &
         done
+        wait || true
+    )
 
-        (
-            log "INFO" "Downloading: $url"
-            # Use -f to fail on HTTP errors (404/500) so we don't save error pages
-            # Use timeouts to prevent hanging indefinitely
-            curl -fsSL -OJ --connect-timeout 15 --max-time 90 "$url" || log "WARN" "Failed to download $url"
-        ) &
-    done
-    wait || true
+    # 4. Count results and swap staging → persistent dir (or fall back to cache).
+    shopt -s nullglob
+    local -a staged=("$staging_dir"/*)
+    shopt -u nullglob
+
+    local -i total ok failed
+    total=${#urls[@]}
+    ok=${#staged[@]}
+    failed=$(( total - ok ))
+
+    if ((ok > 0)); then
+        log "INFO" "Blocklist download summary: ${ok}/${total} succeeded, ${failed} failed."
+        rm -f "$BLOCK_LIST_DIR"/*
+        mv "${staged[@]}" "$BLOCK_LIST_DIR/"
+    else
+        log "WARN" "All ${total} blocklist downloads failed."
+        shopt -s nullglob
+        local cached=("$BLOCK_LIST_DIR"/*)
+        shopt -u nullglob
+        if ((${#cached[@]} > 0)); then
+            log "WARN" "Using ${#cached[@]} cached blocklist file(s) from previous run."
+        else
+            log "WARN" "No cached blocklist files available. Blocklist filtering will be skipped."
+        fi
+    fi
 
     log "INFO" "Blocklist download complete."
-    cd "$SCRIPT_DIR" # Go back to base dir
 }
 
 # Pre-process downloaded lists to separate v4 and v6 content
@@ -480,38 +569,39 @@ separate_ip_families() {
     local v6_clean_dir="$TEMP_DIR/clean_v6"
     mkdir -p "$v4_clean_dir" "$v6_clean_dir"
 
-    # Regex patterns - Anchored to start of line to avoid partial matches in text/HTML
-    # IPv4: Start with optional whitespace, then IP.
+    # Regex patterns — anchored to start of line to avoid partial matches in text/HTML.
+    # IPv4: optional whitespace, then dotted-decimal with optional CIDR.
     local ipv4_regex='^[[:space:]]*([0-9]{1,3}\.){3}[0-9]{1,3}(/[0-9]{1,2})?'
-    # IPv6: Start with optional whitespace, then hex/colon.
+    # IPv6: optional whitespace, then hex+colon with optional prefix length.
+    # This regex alone is too permissive (matches bare hex like "dead").
+    # A second-stage '| grep ":"' is REQUIRED to ensure at least one colon is present.
     local ipv6_regex='^[[:space:]]*[0-9a-fA-F:]+(/[0-9]{1,3})?'
 
     log "INFO" "Processing ${#raw_files[@]} files..."
-    
+
     for file in "${raw_files[@]}"; do
         local filename
         filename=$(basename "$file")
 
-        # Sanity Check: validation for HTML/XML content (e.g. Captive Portal / 404 Page)
-        # We check the first 20 lines for common HTML tags.
+        # Sanity check: reject HTML/XML responses (captive portals, 404 pages).
+        # Checking the first 20 lines is sufficient for any valid DOCTYPE/html tag.
         if head -n 20 "$file" | grep -qiE "<!DOCTYPE|<html|<head|<body"; then
-             log "WARN" "File '$filename' appears to be HTML/XML (invalid content). Skipping."
-             continue
+            log "WARN" "File '$filename' appears to be HTML/XML (invalid content). Skipping."
+            continue
         fi
-        
-        # Extract IPv4 -> clean_v4/filename.v4
-        # We use explicit grep to find ONLY valid-looking v4 lines
-        grep -E "$ipv4_regex" "$file" | grep -v ":" > "$v4_clean_dir/$filename.v4" &
 
-        # Extract IPv6 -> clean_v6/filename.v6
+        # Extract IPv4 → clean_v4/filename.v4
+        # '|| true' is essential: grep exits 1 on no matches; without it 'wait'
+        # would propagate the non-zero status and abort the script via ERR trap.
+        grep -E "$ipv4_regex" "$file" | grep -v ":" > "$v4_clean_dir/$filename.v4" || true &
+
+        # Extract IPv6 → clean_v6/filename.v6 (second-stage grep ensures colon present)
         if [[ "$GEOBLOCK_IPV6" == true ]]; then
-             grep -E "$ipv6_regex" "$file" | grep ":" > "$v6_clean_dir/$filename.v6" &
+            grep -E "$ipv6_regex" "$file" | grep ":" > "$v6_clean_dir/$filename.v6" || true &
         fi
     done
-    wait
-    
-    # Update global pointers/variables or move files back? 
-    # Better to point the generator to these clean dirs.
+    wait || true
+
     BLOCK_LIST_CLEAN_V4_DIR="$v4_clean_dir"
     BLOCK_LIST_CLEAN_V6_DIR="$v6_clean_dir"
     
@@ -522,15 +612,18 @@ separate_ip_families() {
 generate_ip_list() {
     log "INFO" "Generating optimized IP range lists..."
 
-    # Enable nullglob for safe glob expansion; restored on function return via trap
+    # Enable nullglob so globs like *.v4 expand to empty arrays instead of a
+    # literal string when no files match. The RETURN trap restores the option
+    # on normal return. If this function calls 'die' (which calls 'exit'),
+    # RETURN does NOT fire — but since the script is exiting anyway, the leaked
+    # nullglob state is harmless.
     shopt -s nullglob
     trap 'shopt -u nullglob' RETURN
 
     [[ -f "$COUNTRY_IPS_DOWNLOADER" && -x "$COUNTRY_IPS_DOWNLOADER" ]] || die "$COUNTRY_IPS_DOWNLOADER script not found/executable"
 
-    # Define our optimizer command for IPv4.
-    # --ipset-reduce is best for ipset and works well for nft.
-    local IPRANGE_OPTIMIZER_CMD=(iprange --ipset-reduce 20)
+    # Optimizer command for IPv4: --ipset-reduce merges adjacent/overlapping ranges.
+    local iprange_cmd=(iprange --ipset-reduce 20)
 
     # Run the downloader script to get .list.v4 and .list.v6 files
     local downloader_countries_arg
@@ -541,7 +634,18 @@ generate_ip_list() {
         log "INFO" "Downloading country IPs for: $ALLOWED_COUNTRIES (using default provider $GEO_IP_PROVIDER)"
         downloader_countries_arg="$GEO_IP_PROVIDER:$ALLOWED_COUNTRIES"
     fi
-    retry_command "$COUNTRY_IPS_DOWNLOADER" -c "$downloader_countries_arg"
+    # Try to download fresh country IP lists.
+    # On failure (transient DNS/network issue), fall back to cached lists from
+    # the previous successful run, which live persistently in $ALLOW_LIST_DIR.
+    # Only die if the download fails AND no cache exists at all.
+    if ! try_command "$COUNTRY_IPS_DOWNLOADER" -c "$downloader_countries_arg"; then
+        local cached_v4=("$ALLOW_LIST_DIR"/*.v4)
+        if [[ ${#cached_v4[@]} -gt 0 && -s "${cached_v4[0]}" ]]; then
+            log "WARN" "Country IP download failed; using cached lists from previous run."
+        else
+            die "Country IP download failed and no cached lists found. Cannot apply firewall rules."
+        fi
+    fi
 
     # --- Optimize IPv4 List ---
     local v4_files=("$ALLOW_LIST_DIR"/*.v4)
@@ -553,10 +657,10 @@ generate_ip_list() {
 
     if [[ ${#v4_block_files[@]} -gt 0 ]]; then
         log "INFO" "Optimizing IPv4 allow lists and subtracting ${#v4_block_files[@]} blocklists."
-        "${IPRANGE_OPTIMIZER_CMD[@]}" "${v4_files[@]}" --except "${v4_block_files[@]}" >"$IP_RANGE_FILE_V4"
+        "${iprange_cmd[@]}" "${v4_files[@]}" --except "${v4_block_files[@]}" >"$IP_RANGE_FILE_V4"
     else
         log "INFO" "Optimizing IPv4 allow lists (no blocklist)."
-        "${IPRANGE_OPTIMIZER_CMD[@]}" "${v4_files[@]}" >"$IP_RANGE_FILE_V4"
+        "${iprange_cmd[@]}" "${v4_files[@]}" >"$IP_RANGE_FILE_V4"
     fi
 
     # CRITICAL safety check
@@ -616,32 +720,27 @@ cleanup_iptables_chain() {
     $ipt_cmd -t "$table" -X "$custom_chain" 2>/dev/null || true
 }
 
-# Helper to create/populate an ipset (v4 or v6)
+# Helper to create/populate an ipset (v4 or v6).
+# Uses 'ipset restore' for atomic, high-performance loading.
 populate_ipset() {
-    local set_name="$1"
-    local range_file="$2"
-    local family="$3"
-    local set_cmd="ipset"
+    local set_name="$1" range_file="$2" family="$3"
+    local restore_file="$TEMP_DIR/$set_name.ipset.restore"
 
-    log "INFO" "Configuring $set_cmd set '$set_name'..."
+    log "INFO" "Populating ipset '$set_name' (family: $family)..."
 
-    # Create or flush the set
-    if $set_cmd -n -q list "$set_name" &>/dev/null; then
-        $set_cmd flush "$set_name"
-    else
-        $set_cmd create "$set_name" hash:net family "$family" || die "Failed to create $set_cmd set $set_name"
-    fi
+    # Build the restore script atomically in a single write:
+    #   'create -exist' is idempotent (skips creation if set already exists).
+    #   'flush'         clears stale entries from a previous run.
+    # The pre-check+flush that was here previously is redundant: 'restore'
+    # with these two directives handles both the first-run and re-run cases.
+    {
+        echo "create $set_name hash:net family $family -exist"
+        echo "flush $set_name"
+        sed "s/^/add $set_name /" "$range_file"
+    } > "$restore_file"
 
-    # Use ipset restore for high-performance loading
-    local IPSET_RESTORE_FILE="$TEMP_DIR/$set_name.ipset.restore"
-    echo "create $set_name hash:net family $family -exist" > "$IPSET_RESTORE_FILE"
-    echo "flush $set_name" >> "$IPSET_RESTORE_FILE"
-
-    # Use sed for bulk processing instead of slow while-read loop
-    sed "s/^/add $set_name /" "$range_file" >> "$IPSET_RESTORE_FILE"
-
-    $set_cmd restore < "$IPSET_RESTORE_FILE" || die "Failed to restore $set_cmd set"
-    log "INFO" "$set_cmd set '$set_name' populated."
+    ipset restore < "$restore_file" || die "Failed to restore ipset '$set_name'"
+    log "INFO" "ipset '$set_name' populated."
 }
 
 # Apply all firewall rules using the legacy iptables backend
@@ -664,8 +763,8 @@ apply_rules_iptables() {
 
     # 3. Apply IPv4 Rules (Atomic Restore)
     # We use *mangle for PREROUTING (Gatekeeper) and *filter for INPUT/FORWARD protection.
-    local IPTABLES_RULES_FILE="$TEMP_DIR/iptables.rules"
-    cat > "$IPTABLES_RULES_FILE" <<-EOF
+    local iptables_rules_file="$TEMP_DIR/iptables.rules"
+    cat > "$iptables_rules_file" <<-EOF
 *mangle
 :LABO_PREROUTING - [0:0]
 
@@ -722,6 +821,14 @@ COMMIT
 -A LABO_INPUT -i wg+ -j ACCEPT
 
 # SSH Brute Force Mitigation (IPv4)
+# Three-rule pattern (intentional):
+#   Rule 1 (--set):    records every new connection attempt in the 'SSH' table.
+#   Rule 2 (--update + LOG): checks the threshold; --update also refreshes the
+#                     sliding window so the clock restarts on each attempt above
+#                     the limit. No DROP here so the packet continues to rule 3.
+#   Rule 3 (--update + DROP): re-checks and drops. Two separate --update calls
+#                     are required because iptables targets are terminal within
+#                     a rule (LOG does not stop evaluation by itself).
 -A LABO_INPUT -p tcp --dport $SSH_PORT -m state --state NEW -m recent --set --name SSH --rsource
 -A LABO_INPUT -p tcp --dport $SSH_PORT -m state --state NEW -m recent --update --seconds 10 --hitcount 10 --name SSH --rsource -j LOG --log-prefix "SSH BRUTE DROP: "
 -A LABO_INPUT -p tcp --dport $SSH_PORT -m state --state NEW -m recent --update --seconds 10 --hitcount 10 --name SSH --rsource -j DROP
@@ -762,14 +869,14 @@ EOF
     # Generate masquerade rules from constant
     for iface in "${NAT_INTERFACES[@]}"; do
         # iptables uses '+' as wildcard instead of '*'
-        echo "-A LABO_POSTROUTING -o ${iface//\*/+} -j MASQUERADE" >> "$IPTABLES_RULES_FILE"
+        echo "-A LABO_POSTROUTING -o ${iface//\*/+} -j MASQUERADE" >> "$iptables_rules_file"
     done
-    cat >> "$IPTABLES_RULES_FILE" <<-EOF
+    cat >> "$iptables_rules_file" <<-EOF
 COMMIT
 EOF
 
     # Apply Rules
-    iptables-restore --noflush < "$IPTABLES_RULES_FILE" || die "Failed to apply iptables rules"
+    iptables-restore --noflush < "$iptables_rules_file" || die "Failed to apply iptables rules"
 
     # Hook into system chains
     iptables -t mangle -I PREROUTING 1 -j LABO_PREROUTING
@@ -795,8 +902,8 @@ EOF
             cleanup_iptables_chain ip6tables filter  INPUT       LABO_INPUT_V6
             cleanup_iptables_chain ip6tables filter  DOCKER-USER LABO_DOCKER_USER_V6
 
-            local IP6TABLES_RULES_FILE="$TEMP_DIR/ip6tables.rules"
-            cat > "$IP6TABLES_RULES_FILE" <<-EOF
+            local ip6tables_rules_file="$TEMP_DIR/ip6tables.rules"
+            cat > "$ip6tables_rules_file" <<-EOF
 *mangle
 :LABO_PREROUTING_V6 - [0:0]
 
@@ -819,9 +926,9 @@ EOF
 # Blocklist IPv6 (Drop)
 EOF
             if [[ -s "$IP_RANGE_FILE_BLOCK_V6" ]]; then
-               echo "-A LABO_PREROUTING_V6 -m set --match-set $BLOCK_LIST_NAME_V6 src -j DROP" >> "$IP6TABLES_RULES_FILE"
+               echo "-A LABO_PREROUTING_V6 -m set --match-set $BLOCK_LIST_NAME_V6 src -j DROP" >> "$ip6tables_rules_file"
             fi
-            cat >> "$IP6TABLES_RULES_FILE" <<-EOF
+            cat >> "$ip6tables_rules_file" <<-EOF
 
 # Geo-IP Filter (DROP)
 -A LABO_PREROUTING_V6 -m set ! --match-set $ALLOW_LIST_NAME_V6 src -j DROP
@@ -860,7 +967,7 @@ COMMIT
 -A LABO_DOCKER_USER_V6 -j RETURN
 COMMIT
 EOF
-            ip6tables-restore --noflush < "$IP6TABLES_RULES_FILE" || die "Failed to apply ip6tables rules"
+            ip6tables-restore --noflush < "$ip6tables_rules_file" || die "Failed to apply ip6tables rules"
 
             ip6tables -t mangle -I PREROUTING 1 -j LABO_PREROUTING_V6
             ip6tables -I INPUT 1 -j LABO_INPUT_V6
@@ -950,6 +1057,11 @@ apply_rules_nftables() {
     # We construct the config stream dynamically to inject the files.
     # This subshell outputs the entire valid NFTables configuration.
     (
+        # Derive nftables set elements from the PRIVATE_NETS_* constants (single source of truth).
+        local priv_v4_elems priv_v6_elems
+        priv_v4_elems=$(printf "%s, " "${PRIVATE_NETS_V4[@]}"); priv_v4_elems="${priv_v4_elems%, }"
+        priv_v6_elems=$(printf "%s, " "${PRIVATE_NETS_V6[@]}"); priv_v6_elems="${priv_v6_elems%, }"
+
         cat <<EOF
         table inet $NFT_TABLE_NAME {
             # ========= SETS =========
@@ -957,11 +1069,11 @@ apply_rules_nftables() {
 
             set private_nets_v4 {
                 type ipv4_addr; flags interval; auto-merge;
-                elements = { 10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16 }
+                elements = { $priv_v4_elems }
             }
             set private_nets_v6 {
                 type ipv6_addr; flags interval; auto-merge;
-                elements = { fc00::/7, fe80::/10, ff00::/8 }
+                elements = { $priv_v6_elems }
             }
             set $ALLOW_LIST_NAME_V4 {
                 type ipv4_addr; flags interval; auto-merge;
@@ -1168,15 +1280,20 @@ main() {
     # 6. Create directories
     mkdir -p "$ALLOW_LIST_DIR" "$BLOCK_LIST_DIR" || die "Failed to create directories"
 
-    # 7. Download v4 blocklists if -b is used
+    # 7. Download v4 blocklists if -b is used.
+    # Non-fatal: if the remote index is unreachable (transient DNS/network issue),
+    # we disable blocklists for this run and continue with geo-IP only.
     if [[ "$USE_BLOCKLIST" == true ]]; then
-        download_blocklists
-        separate_ip_families
+        if download_blocklists; then
+            separate_ip_families
+        else
+            log "WARN" "Blocklist download failed; proceeding with geo-IP filtering only."
+            USE_BLOCKLIST=false
+        fi
     fi
 
-    # 8. Download country lists and generate final v4/v6 range files
-    # This step is critical. It calls the retry_command, and
-    # generate_ip_list() itself will 'die' if the final list is empty.
+    # 8. Download country lists and generate final v4/v6 range files.
+    # Falls back to cached lists on transient failures; dies only if no cache exists.
     generate_ip_list
 
     # 9. Dispatch to the correct firewall function
