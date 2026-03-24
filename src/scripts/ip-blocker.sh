@@ -185,6 +185,7 @@ _resolve_hostname() {
         echo "${ips[*]}"
     fi
 }
+export -f _resolve_hostname
 
 # Setup signal traps for robust execution and cleanup
 setup_signal_handlers() {
@@ -400,7 +401,7 @@ detect_backend() {
     log "INFO" "Detecting firewall backend..."
     if command -v nft &>/dev/null; then
         FIREWALL_BACKEND="nftables"
-        REQUIRED_COMMANDS=(curl iprange nft dig)
+        REQUIRED_COMMANDS=(curl iprange nft)
         log "INFO" "Backend selected: nftables (native)"
 
         # Pre-flight check: Verify nftables functionality
@@ -412,7 +413,7 @@ detect_backend() {
     elif command -v iptables &>/dev/null && command -v ipset &>/dev/null; then
         FIREWALL_BACKEND="iptables"
         # Dynamically add IPv6 tools only if needed
-        REQUIRED_COMMANDS=(curl ipset iptables iprange iptables-restore dig)
+        REQUIRED_COMMANDS=(curl ipset iptables iprange iptables-restore)
         if [[ "$GEOBLOCK_IPV6" == true ]]; then
              REQUIRED_COMMANDS+=(ip6tables ip6tables-restore)
         fi
@@ -429,6 +430,11 @@ check_installed_commands() {
         command -v "$cmd" >/dev/null 2>&1 || missing_commands+=("$cmd")
     done
     [[ ${#missing_commands[@]} -eq 0 ]] || die "Missing commands: ${missing_commands[*]}"
+
+    # dig is required only when DNS_SERVERS is set (early-boot DNS override)
+    if [[ -n "${DNS_SERVERS:-}" ]] && ! command -v dig >/dev/null 2>&1; then
+        die "DNS_SERVERS is set but 'dig' (bind-tools/dnsutils) is not installed."
+    fi
 }
 
 retry_command() {

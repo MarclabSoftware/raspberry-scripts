@@ -49,7 +49,7 @@ readonly SCRIPT_DIR
 # Define the output directory for allowed lists
 readonly ALLOW_DIR="$SCRIPT_DIR/lists/allow"
 # Required commands for dependency checks (base set; provider-specific added later)
-readonly REQUIRED_COMMANDS=(curl grep sed awk cut dig)
+readonly REQUIRED_COMMANDS=(curl grep sed awk cut)
 # Max concurrent download jobs for parallel processing
 readonly MAX_DOWNLOAD_JOBS=4
 # Maximum download retry attempts (exponential backoff: 2s, 4s, 8s...)
@@ -225,7 +225,7 @@ _resolve_hostname() {
     for ns in "${servers[@]}"; do
         # Extract IPv4 (A) as it is the most common fallback needed.
         local res
-        res=$(dig +short "@$ns" "$host" A 2/dev/null | grep -E '^[0-9.]+$' || true)
+        res=$(dig +short "@$ns" "$host" A 2>/dev/null | grep -E '^[0-9.]+$' || true)
         if [[ -n "$res" ]]; then
             while read -r ip; do ips+=("$ip"); done <<< "$res"
             break # Stop at first successful resolver
@@ -283,6 +283,7 @@ download_file() {
     log "ERROR" "Failed to download $url after $MAX_DOWNLOAD_RETRIES attempts."
     return 1 # Final failure
 }
+export -f _resolve_hostname
 export -f download_file
 
 # Validates a generated IP list before moving it to the final destination.
@@ -603,6 +604,11 @@ main() {
 
     # 2. Check for all required tools
     check_dependencies
+
+    # dig is required only when DNS_SERVERS is set (early-boot DNS override)
+    if [[ -n "${DNS_SERVERS:-}" ]] && ! command -v dig >/dev/null 2>&1; then
+        die "DNS_SERVERS is set but 'dig' (bind-tools/dnsutils) is not installed."
+    fi
 
     # 3. Create the output directory
     mkdir -p "$ALLOW_DIR" || die "Failed to create directory: $ALLOW_DIR"
