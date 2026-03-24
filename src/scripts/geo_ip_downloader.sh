@@ -23,9 +23,12 @@
 #               Example: 'ripe:IT,FR;ipdeny:CN,KR;nirsoft:DE'
 #   -h          Display this help message.
 #
+# Environment:
+#   DNS_SERVERS    Custom DNS servers for early-boot resolution (e.g. "8.8.8.8 1.1.1.1")
+#
 # Author: LaboDJ
-# Version: 6.5
-# Last Updated: 2026/03/19
+# Version: 6.6
+# Last Updated: 2026/03/24
 ###############################################################################
 
 # Enable strict mode
@@ -46,7 +49,7 @@ readonly SCRIPT_DIR
 # Define the output directory for allowed lists
 readonly ALLOW_DIR="$SCRIPT_DIR/lists/allow"
 # Required commands for dependency checks (base set; provider-specific added later)
-readonly REQUIRED_COMMANDS=(curl grep sed awk cut)
+readonly REQUIRED_COMMANDS=(curl grep sed awk cut dig)
 # Max concurrent download jobs for parallel processing
 readonly MAX_DOWNLOAD_JOBS=4
 # Maximum download retry attempts (exponential backoff: 2s, 4s, 8s...)
@@ -60,6 +63,8 @@ declare -ra ALLOWED_PROVIDERS=(ipdeny ripe nirsoft)
 
 declare ALLOWED_COUNTRIES_SYNTAX="" # e.g., "ripe:IT,FR;ipdeny:CN"
 declare TEMP_DIR="" # Used for RIPE/Nirsoft downloads
+# Cache for resolved hostnames to avoid redundant 'dig' calls
+declare -A RESOLVED_HOSTS_CACHE
 
 ###################
 # Error Handling & Logging
@@ -191,8 +196,50 @@ check_dependencies() {
     [[ ${#missing_commands[@]} -eq 0 ]] || die "Missing commands/features: ${missing_commands[*]}"
 }
 
+# Logs the current DNS configuration for early-boot stability.
+log_dns_config() {
+    if [[ -n "${DNS_SERVERS:-}" ]]; then
+        log "INFO" "Custom DNS resolution active (Servers: $DNS_SERVERS)"
+    else
+        log "INFO" "Custom DNS resolution disabled (using system resolver)"
+    fi
+}
+
+# Internal helper to resolve a hostname via specific DNS servers provided in DNS_SERVERS.
+# It uses an associative array to cache results for the current execution.
+# @param $1 Hostname
+# @return Space-separated IPs
+_resolve_hostname() {
+    local host="$1"
+    [[ -z "${DNS_SERVERS:-}" ]] && return 0
+    # Return from cache if available
+    [[ -n "${RESOLVED_HOSTS_CACHE[$host]:-}" ]] && { echo "${RESOLVED_HOSTS_CACHE[$host]}"; return 0; }
+
+    local -a ips=()
+    local -a servers=()
+    if [[ -n "${DNS_SERVERS:-}" ]]; then
+        read -ra servers <<< "${DNS_SERVERS:-}"
+    fi
+
+    # Try each DNS server until one succeeds
+    for ns in "${servers[@]}"; do
+        # Extract IPv4 (A) as it is the most common fallback needed.
+        local res
+        res=$(dig +short "@$ns" "$host" A 2/dev/null | grep -E '^[0-9.]+$' || true)
+        if [[ -n "$res" ]]; then
+            while read -r ip; do ips+=("$ip"); done <<< "$res"
+            break # Stop at first successful resolver
+        fi
+    done
+
+    if [[ ${#ips[@]} -gt 0 ]]; then
+        RESOLVED_HOSTS_CACHE[$host]="${ips[*]}"
+        echo "${ips[*]}"
+    fi
+}
+
 # Centralized, robust function for downloading a file using curl.
-# Includes granular retry logic with exponential backoff.
+# Includes granular retry logic with exponential backoff and custom DNS resolution.
 # @param $1 The URL to download
 # @param $2 The temporary output file path
 # @return 0 on success, 1 on failure
@@ -200,12 +247,30 @@ download_file() {
     local url="$1"
     local temp_outfile="$2"
     local retries=0
+    local -a resolve_opts=()
+
+    # 1. Handle custom DNS resolution if DNS_SERVERS is set (for early boot stability)
+    if [[ -n "${DNS_SERVERS:-}" ]]; then
+        local host port
+        host=$(echo "$url" | awk -F[/:] '{print $4}')
+        [[ "$url" == https://* ]] && port=443 || port=80
+        if [[ "$host" == *:* ]]; then
+            port="${host##*:}"
+            host="${host%:*}"
+        fi
+
+        local -a ips=()
+        read -ra ips <<< "$(_resolve_hostname "$host")"
+        for ip in "${ips[@]}"; do
+            resolve_opts+=("--resolve" "$host:$port:$ip")
+        done
+    fi
 
     while ((retries < MAX_DOWNLOAD_RETRIES)); do
         # -sSLf: Silent, follow redirects, fail fast on server errors (4xx, 5xx)
         # --connect-timeout 10: Fail if connection is not made in 10s
         # --max-time 30: Fail if the *entire* download takes longer than 30s
-        if curl -sSLf --connect-timeout 10 --max-time 30 "$url" -o "$temp_outfile"; then
+        if curl -sSLf "${resolve_opts[@]}" --connect-timeout 10 --max-time 30 "$url" -o "$temp_outfile"; then
             return 0 # Success
         fi
 
@@ -534,6 +599,7 @@ main() {
     # 1. Setup traps and parse arguments
     setup_signal_handlers
     parse_arguments "$@"
+    log_dns_config
 
     # 2. Check for all required tools
     check_dependencies
@@ -594,11 +660,12 @@ main() {
 
     # 8. Dispatch to the correct provider functions
     for provider in "${!provider_country_map[@]}"; do
-        # Create a clean array of unique country codes for this provider
-        local -a country_array
-        # Word-split the space-separated codes (safe: sanitized uppercase, no spaces),
+        local -a country_array=()
+        # Word-split the space-separated codes robustly (no glob expansion),
         # output one per line for sort -u, then build the final array.
-        mapfile -t country_array < <(printf '%s\n' ${provider_country_map[$provider]} | sort -u)
+        local -a raw_countries=()
+        read -ra raw_countries <<< "${provider_country_map[$provider]}"
+        mapfile -t country_array < <(printf '%s\n' "${raw_countries[@]}" | sort -u)
 
         [[ ${#country_array[@]} -gt 0 ]] || continue # Skip if no countries
 
