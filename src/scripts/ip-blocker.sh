@@ -37,9 +37,12 @@
 #                  Supports wildcards (e.g. "br-* wg* eth*").
 #   -h             Display this help message.
 #
+# Environment:
+#   DNS_SERVERS    Custom DNS servers for early-boot resolution (e.g. "8.8.8.8 1.1.1.1")
+#
 # Author: LaboDJ
-# Version: 5.6
-# Last Updated: 2026/03/19
+# Version: 5.7
+# Last Updated: 2026/03/24
 ###############################################################################
 
 # Enable strict mode:
@@ -126,6 +129,8 @@ declare -a REQUIRED_COMMANDS=()
 # Paths for clean intermediate lists
 declare BLOCK_LIST_CLEAN_V4_DIR=""
 declare BLOCK_LIST_CLEAN_V6_DIR=""
+# Cache for resolved hostnames to avoid redundant 'dig' calls
+declare -A RESOLVED_HOSTS_CACHE
 
 ###################
 # Error Handling & Logging
@@ -137,6 +142,48 @@ handle_error() {
     local line_number=$1
     log "ERROR" "Script failed at line $line_number with exit code $exit_code"
     exit "$exit_code"
+}
+
+# Logs the current DNS configuration for early-boot stability.
+log_dns_config() {
+    if [[ -n "${DNS_SERVERS:-}" ]]; then
+        log "INFO" "Custom DNS resolution active (Servers: $DNS_SERVERS)"
+    else
+        log "INFO" "Custom DNS resolution disabled (using system resolver)"
+    fi
+}
+
+# Internal helper to resolve a hostname via specific DNS servers provided in DNS_SERVERS.
+# It uses an associative array to cache results for the current execution.
+# @param $1 Hostname
+# @return Space-separated IPs
+_resolve_hostname() {
+    local host="$1"
+    [[ -z "${DNS_SERVERS:-}" ]] && return 0
+    # Return from cache if available
+    [[ -n "${RESOLVED_HOSTS_CACHE[$host]:-}" ]] && echo "${RESOLVED_HOSTS_CACHE[$host]}" && return 0
+
+    local -a ips=()
+    local -a servers=()
+    if [[ -n "${DNS_SERVERS:-}" ]]; then
+        read -ra servers <<< "${DNS_SERVERS:-}"
+    fi
+
+    # Try each DNS server until one succeeds
+    for ns in "${servers[@]}"; do
+        # Extract IPv4 (A) as it is the most common fallback needed.
+        local res
+        res=$(dig +short "@$ns" "$host" A 2>/dev/null | grep -E '^[0-9.]+$' || true)
+        if [[ -n "$res" ]]; then
+            while read -r ip; do ips+=("$ip"); done <<< "$res"
+            break # Stop at first successful resolver
+        fi
+    done
+
+    if [[ ${#ips[@]} -gt 0 ]]; then
+        RESOLVED_HOSTS_CACHE[$host]="${ips[*]}"
+        echo "${ips[*]}"
+    fi
 }
 
 # Setup signal traps for robust execution and cleanup
@@ -320,10 +367,19 @@ check_connectivity() {
 
     while ((elapsed < CONNECTIVITY_MAX_WAIT)); do
         for site in "${CONNECTIVITY_CHECK_SITES[@]}"; do
+            local -a resolve_opts=()
+            if [[ -n "${DNS_SERVERS:-}" ]]; then
+                local -a ips=()
+                read -ra ips <<< "$(_resolve_hostname "$site")"
+                for ip in "${ips[@]}"; do
+                    resolve_opts+=("--resolve" "$site:443:$ip")
+                done
+            fi
+
             # -f: fail on HTTP error  --head: no body download
             # --connect-timeout: abort if TCP handshake takes > 5s
             # --max-time: hard cap on the entire request
-            if curl -fsSL --head --connect-timeout 5 --max-time 10 "https://$site" >/dev/null 2>&1; then
+            if curl -fsSL "${resolve_opts[@]}" --head --connect-timeout 5 --max-time 10 "https://$site" >/dev/null 2>&1; then
                 log "INFO" "Connectivity check passed ($site, ${elapsed}s after start)"
                 return 0
             fi
@@ -344,7 +400,7 @@ detect_backend() {
     log "INFO" "Detecting firewall backend..."
     if command -v nft &>/dev/null; then
         FIREWALL_BACKEND="nftables"
-        REQUIRED_COMMANDS=(curl iprange nft)
+        REQUIRED_COMMANDS=(curl iprange nft dig)
         log "INFO" "Backend selected: nftables (native)"
 
         # Pre-flight check: Verify nftables functionality
@@ -356,7 +412,7 @@ detect_backend() {
     elif command -v iptables &>/dev/null && command -v ipset &>/dev/null; then
         FIREWALL_BACKEND="iptables"
         # Dynamically add IPv6 tools only if needed
-        REQUIRED_COMMANDS=(curl ipset iptables iprange iptables-restore)
+        REQUIRED_COMMANDS=(curl ipset iptables iprange iptables-restore dig)
         if [[ "$GEOBLOCK_IPV6" == true ]]; then
              REQUIRED_COMMANDS+=(ip6tables ip6tables-restore)
         fi
@@ -465,7 +521,17 @@ download_blocklists() {
     # Non-fatal on network failure: fall back to the cached index from the previous
     # run (which lives at BLOCK_LIST_FILE_NAME on disk). Only return 1 if the index
     # is unreachable AND no cached copy exists.
-    if ! try_command curl -fsSL --connect-timeout 10 --max-time 30 "$BLOCK_LIST_URL" -o "$BLOCK_LIST_FILE_NAME"; then
+    local -a index_resolve_opts=()
+    if [[ -n "${DNS_SERVERS:-}" ]]; then
+        local url_host url_port
+        local -a ips=()
+        url_host=$(echo "$BLOCK_LIST_URL" | awk -F[/:] '{print $4}')
+        [[ "$BLOCK_LIST_URL" == https://* ]] && url_port=443 || url_port=80
+        read -ra ips <<< "$(_resolve_hostname "$url_host")"
+        for ip in "${ips[@]}"; do index_resolve_opts+=("--resolve" "$url_host:$url_port:$ip"); done
+    fi
+
+    if ! try_command curl -fsSL "${index_resolve_opts[@]}" --connect-timeout 10 --max-time 30 "$BLOCK_LIST_URL" -o "$BLOCK_LIST_FILE_NAME"; then
         if [[ -f "$BLOCK_LIST_FILE_NAME" ]]; then
             log "WARN" "Blocklist index unreachable; using cached index from previous run."
         else
@@ -508,11 +574,21 @@ download_blocklists() {
                 wait -n || true
             done
             (
+                local -a resolve_opts=()
+                if [[ -n "${DNS_SERVERS:-}" ]]; then
+                    local url_host url_port
+                    local -a ips=()
+                    url_host=$(echo "$url" | awk -F[/:] '{print $4}')
+                    [[ "$url" == https://* ]] && url_port=443 || url_port=80
+                    read -ra ips <<< "$(_resolve_hostname "$url_host")"
+                    for ip in "${ips[@]}"; do resolve_opts+=("--resolve" "$url_host:$url_port:$ip"); done
+                fi
+
                 log "INFO" "Downloading: $url"
                 # Capture curl stderr so errors appear in our structured log format
                 # instead of raw lines that journald may split across entries.
                 local curl_err
-                if ! curl_err=$(curl -fsSL -OJ --connect-timeout 15 --max-time 90 "$url" 2>&1); then
+                if ! curl_err=$(curl -fsSL "${resolve_opts[@]}" -OJ --connect-timeout 15 --max-time 90 "$url" 2>&1); then
                     log "WARN" "Failed to download $url: ${curl_err%%$'\n'*}"
                 fi
             ) &
@@ -1264,6 +1340,7 @@ EOF
 main() {
     # 1. Check root, create secure temp dir, and setup traps
     setup_temp_dir_and_traps
+    log_dns_config
 
     # 2. Parse -c, -p, -b, -G, -s flags
     parse_arguments "$@"
