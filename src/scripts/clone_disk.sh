@@ -162,12 +162,17 @@ get_partuuid() {
     blkid -s PARTUUID -o value "$1"
 }
 
-# Generic error handler, triggered by 'trap ... ERR'
-# @param $1 The line number where the error occurred
+# Generic error handler, triggered by 'trap ... ERR'.
+# @param $1 The line number where the error occurred (passed as $LINENO from the trap).
 handle_error() {
     local exit_code=$?
     local line_number=$1
-    log "ERROR" "Script failed at line $line_number with exit code $exit_code"
+    local i stack_trace=""
+    for ((i = 1; i < ${#FUNCNAME[@]}; i++)); do
+        stack_trace+="${FUNCNAME[$i]}(L${BASH_LINENO[$((i-1))]})"
+        ((i < ${#FUNCNAME[@]} - 1)) && stack_trace+=" → "
+    done
+    log "ERROR" "Script failed at line $line_number with exit code $exit_code | stack: $stack_trace"
     exit "$exit_code"
 }
 
