@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 
 ###############################################################################
-# Universal System Clone Script (RPi & x86) v2.2
+# Universal System Clone Script (RPi & x86) v2.3
 #
 # Creates a bootable 1:1 clone of the running Linux system to an external drive.
 # Automatically adapts to the source architecture (MBR/Legacy or GPT/UEFI).
@@ -15,7 +15,7 @@
 # Usage: sudo ./clone_disk.sh
 #
 # Requirements: rsync, parted, mkfs.*, blkid, lsblk, findmnt
-# Author: LaboDJ | Last Updated: 2026/03/20
+# Author: LaboDJ | Last Updated: 2026/03/25
 ###############################################################################
 
 # Enable strict mode:
@@ -99,12 +99,16 @@ log() {
     printf '%(%Y-%m-%d %H:%M:%S)T %b[%s]%b %s\n' -1 "$color" "$level" "$NC" "$*" >&2
 }
 
+# Log an error message and terminate the script immediately.
+# @param $* The error message to log
+die() {
+    log "ERROR" "$*"
+    exit 1
+}
+
 # Verify script is run as root
 check_root() {
-    if [[ "$(id -u)" != "0" ]]; then
-        log "ERROR" "This script must be run as root!"
-        exit 1
-    fi
+    [[ "${EUID:-$(id -u)}" -eq 0 ]] || die "This script must be run as root."
 }
 
 # Check for all required dependencies
@@ -113,8 +117,7 @@ check_dependencies() {
     for cmd in "${REQUIRED_COMMANDS[@]}"; do
         command -v "$cmd" >/dev/null 2>&1 || missing+=("$cmd")
     done
-
-    [[ ${#missing[@]} -eq 0 ]] || { log "ERROR" "Missing required commands: ${missing[*]}"; exit 1; }
+    [[ ${#missing[@]} -eq 0 ]] || die "Missing required commands: ${missing[*]}"
 }
 
 # Detect partition table type of a disk (mbr or gpt)
@@ -203,15 +206,15 @@ _patch_loader_entries() {
     log "INFO" "Patching systemd-boot entries in $entries_dir..."
     shopt -s nullglob
     trap 'shopt -u nullglob' RETURN
-    local patched=false
+    local entries_found=false
     for entry in "$entries_dir"/*.conf; do
-        patched=true
+        entries_found=true
         log "INFO" "Patching systemd-boot entry: $entry"
         if grep -q "root=" "$entry"; then
             sed -E -i "s/root=[^ ]+/root=PARTUUID=$new_partuuid/g" "$entry"
         fi
     done
-    [[ "$patched" == true ]]
+    [[ "$entries_found" == true ]]
 }
 
 # Verify systemd-boot loader entries contain the expected UUID/PARTUUID.
@@ -274,14 +277,14 @@ check_space() {
     local required_size=$((total_src_used + base_margin + percent_margin))
     
     if [[ "$dst_size" -lt "$required_size" ]]; then
-        log "ERROR" "Destination disk is too small!"
-        log "ERROR" "Source Data (Used + Margin): $(numfmt --to=iec-i --suffix=B "$required_size")"
-        log "ERROR" "Destination Size:          $(numfmt --to=iec-i --suffix=B "$dst_size")"
-        exit 1
+        log "ERROR" "Destination disk is too small."
+        log "ERROR" "Required (source data + margin): $(numfmt --to=iec-i --suffix=B "$required_size")"
+        log "ERROR" "Destination available:           $(numfmt --to=iec-i --suffix=B "$dst_size")"
+        die "Aborting: destination disk too small to hold source data."
     else
         log "INFO" "Space check passed."
-        log "INFO" "Source Data: $(numfmt --to=iec-i --suffix=B "$total_src_used")"
-        log "INFO" "Dest Size:   $(numfmt --to=iec-i --suffix=B "$dst_size")"
+        log "INFO" "Required (source data + margin): $(numfmt --to=iec-i --suffix=B "$required_size")"
+        log "INFO" "Destination available:           $(numfmt --to=iec-i --suffix=B "$dst_size")"
     fi
 }
 
@@ -316,6 +319,10 @@ cleanup() {
             if [[ "$discard_max" != "0B" ]] && [[ "$discard_max" != "0" ]]; then
                 log "INFO" "Running fstrim on destination..."
                 fstrim -v "$DST_MOUNT_ROOT" || true
+                # Also trim the boot partition if it is still mounted.
+                if [[ -n "$BOOT_MOUNT" ]] && mountpoint -q "$DST_MOUNT_ROOT$BOOT_MOUNT" 2>/dev/null; then
+                    fstrim -v "$DST_MOUNT_ROOT$BOOT_MOUNT" 2>/dev/null || true
+                fi
             else
                 log "INFO" "Skipping fstrim (not supported by device)."
             fi
@@ -330,8 +337,13 @@ cleanup() {
         rm -rf "$DST_MOUNT_ROOT"
     fi
 }
-trap cleanup EXIT
-trap 'handle_error $LINENO' ERR
+# Configures signal traps for robust error handling and cleanup on all exit paths.
+setup_signal_handlers() {
+    trap 'handle_error $LINENO' ERR
+    trap 'log "INFO" "Received SIGINT. Cleaning up..."; exit 130' INT
+    trap 'log "INFO" "Received SIGTERM. Cleaning up..."; exit 143' TERM
+    trap 'cleanup' EXIT
+}
 
 ###################
 # Core Logic
@@ -341,7 +353,9 @@ trap 'handle_error $LINENO' ERR
 select_disks() {
     echo "=== Disk Selection ==="
     echo "Available disks:"
-    lsblk -d -o NAME,SIZE,MODEL,TRAN | grep -E "sd|nvme|mmcblk" || true
+    # Filter on the NAME column only (awk $1) to avoid false matches on model names
+    # (e.g. a disk named "SanDisk" would incorrectly match "sd" against the full line).
+    lsblk -d -n -o NAME,SIZE,MODEL,TRAN | awk '$1 ~ /^(sd|nvme|mmcblk)/' || true
 
     # Auto-detect Source Disk (The one hosting /)
     # We MUST clone the disk we are running from, because rsync copies from /
@@ -387,15 +401,21 @@ select_disks() {
     while true; do
         echo -e "\nEnter DESTINATION disk name (e.g., sdb, sdc): "
         read -r dst_name
+        # Reject names containing non-alphanumeric characters to prevent path
+        # traversal or command injection (e.g. "../sda", "sda; rm -rf /").
+        if [[ ! "$dst_name" =~ ^[a-zA-Z0-9]+$ ]]; then
+            echo "Error: Invalid device name '$dst_name'. Only alphanumeric characters are allowed."
+            continue
+        fi
         DST_DEVICE="/dev/$dst_name"
 
         if [[ ! -b "$DST_DEVICE" ]]; then
-            echo "Error: Invalid device $DST_DEVICE"
+            echo "Error: '$DST_DEVICE' is not a valid block device."
             continue
         fi
 
         if [[ "$SRC_DEVICE" == "$DST_DEVICE" ]]; then
-            echo "Error: Source and destination cannot be the same!"
+            echo "Error: Source and destination cannot be the same device!"
             continue
         fi
         break
@@ -429,21 +449,19 @@ perform_full_backup() {
     
     log "INFO" "Creating partition table..."
     if [[ "$SRC_TABLE_TYPE" == "gpt" ]]; then
-        # x86/UEFI Standard: GPT
-        parted -s -a optimal "$DST_DEVICE" mklabel gpt
-        # ESP (EFI System Partition) - 1024MB (Future proofing)
-        # Start at 1MiB to protect MBR/Bootloader area
-        parted -s -a optimal "$DST_DEVICE" mkpart "EFI" fat32 1MiB 1025MiB
-        parted -s -a optimal "$DST_DEVICE" set 1 esp on
-        # Root - Rest of disk
-        parted -s -a optimal "$DST_DEVICE" mkpart "Root" ext4 1025MiB 100%
+        # x86/UEFI: GPT with 1024 MiB ESP + root. All operations in one invocation
+        # to avoid leaving the disk in a partially-partitioned state between calls.
+        parted -s -a optimal "$DST_DEVICE" \
+            mklabel gpt \
+            mkpart "EFI" fat32 1MiB 1025MiB \
+            set 1 esp on \
+            mkpart "Root" ext4 1025MiB 100%
     else
-        # RPi/Legacy Standard: MBR (msdos)
-        parted -s -a optimal "$DST_DEVICE" mklabel msdos
-        # Boot - 1024MB (Fat32)
-        parted -s -a optimal "$DST_DEVICE" mkpart primary fat32 1MiB 1025MiB
-        # Root - Rest of disk
-        parted -s -a optimal "$DST_DEVICE" mkpart primary ext4 1025MiB 100%
+        # RPi/Legacy: MBR (msdos) with 1024 MiB FAT32 boot + root.
+        parted -s -a optimal "$DST_DEVICE" \
+            mklabel msdos \
+            mkpart primary fat32 1MiB 1025MiB \
+            mkpart primary ext4 1025MiB 100%
     fi
 
     # Force kernel to reread partition table
@@ -456,8 +474,7 @@ perform_full_backup() {
     local timeout=20
     while [[ ! -b "$DST_PART1" || ! -b "$DST_PART2" ]]; do
         if (( timeout-- == 0 )); then
-            log "ERROR" "Timed out waiting for partition devices to appear."
-            exit 1
+            die "Timed out waiting for partition devices $DST_PART1 / $DST_PART2 to appear."
         fi
         sleep 1
     done
@@ -508,7 +525,15 @@ perform_incremental_update() {
                 continue
             }
         fi
-        fsck -y "$part" || log "WARN" "fsck on $part returned error, proceeding anyway..."
+        # Use the filesystem-appropriate checker: fsck.fat for FAT32 (-a = auto-repair)
+        # does not accept the -y flag, which is ext4/e2fsck-specific.
+        local fs_type
+        fs_type=$(blkid -s TYPE -o value "$part" 2>/dev/null || true)
+        if [[ "$fs_type" == "vfat" ]]; then
+            fsck.fat -a "$part" || log "WARN" "fsck.fat on $part returned non-zero (code $?), proceeding..."
+        else
+            fsck -y "$part" || log "WARN" "fsck on $part returned non-zero (code $?), proceeding..."
+        fi
     done
 
     # 2. Mount
@@ -614,37 +639,48 @@ sync_data() {
     fi
 
     log "INFO" "Syncing Boot Partition..."
-    
-    # Use global BOOT_MOUNT determined in mount_destination
-    SRC_BOOT="$BOOT_MOUNT/"
-    DST_BOOT="$DST_MOUNT_ROOT$BOOT_MOUNT/"
 
-    # Sync Boot Partition
-    # Use specific flags for VFAT/FAT32:
-    # --no-perms, --no-owner, --no-group: FAT doesn't support these
-    # --copy-links: FAT doesn't support symlinks, so we copy the content
-    # --modify-window=2: FAT has 2s timestamp resolution
+    # BOOT_MOUNT is set by mount_destination(); declare local copies to avoid
+    # leaking into the global scope.
+    local SRC_BOOT="$BOOT_MOUNT/"
+    local DST_BOOT="$DST_MOUNT_ROOT$BOOT_MOUNT/"
+
+    # Sync Boot Partition.
+    # FAT32-specific flags:
+    # --no-perms/--no-owner/--no-group: FAT32 has no Unix permission model.
+    # --copy-links: FAT32 has no symlink support; copy the target file instead.
+    # --modify-window=2: FAT32 timestamps have 2-second resolution.
+    local boot_rsync_exit=0
     rsync -rt --no-perms --no-owner --no-group --copy-links --info=progress2 --delete --modify-window=2 \
-        "$SRC_BOOT" "$DST_BOOT"
+        "$SRC_BOOT" "$DST_BOOT" || boot_rsync_exit=$?
+
+    if [[ $boot_rsync_exit -eq 0 ]]; then
+        log "INFO" "Boot sync completed successfully."
+    elif [[ $boot_rsync_exit -eq 24 ]]; then
+        log "WARN" "Rsync reported vanished files during boot sync (code 24). Normal on a live system."
+    else
+        die "Boot rsync failed with error code $boot_rsync_exit."
+    fi
 }
 
 # Update destination configuration files (fstab, cmdline.txt)
 # This ensures the cloned system boots by using the correct NEW UUIDs.
 update_destination_config() {
     log "INFO" "Updating destination configuration (fstab/cmdline)..."
-    
-    # Retrieve NEW UUIDs/PARTUUIDs from the freshly formatted destination
-    local new_root_uuid
+
+    # Retrieve NEW UUIDs/PARTUUIDs from the freshly formatted destination partitions.
+    local new_root_uuid new_boot_uuid new_root_partuuid new_boot_partuuid
     new_root_uuid=$(get_uuid "$DST_PART2")
-    local new_boot_uuid
     new_boot_uuid=$(get_uuid "$DST_PART1")
-    local new_root_partuuid
     new_root_partuuid=$(get_partuuid "$DST_PART2")
-    local new_boot_partuuid
     new_boot_partuuid=$(get_partuuid "$DST_PART1")
 
+    log "INFO" "New root: UUID=$new_root_uuid  PARTUUID=$new_root_partuuid"
+    log "INFO" "New boot: UUID=$new_boot_uuid  PARTUUID=$new_boot_partuuid"
+
     local dst_fstab="$DST_MOUNT_ROOT/etc/fstab"
-    local dst_cmdline="$DST_MOUNT_ROOT/boot/firmware/cmdline.txt" # RPi specific
+    # cmdline.txt path is boot-mount-relative; works for both /boot and /boot/firmware.
+    local dst_cmdline="$DST_MOUNT_ROOT$BOOT_MOUNT/cmdline.txt"
 
     # Sanitize BOOT_MOUNT (remove trailing slash) for awk comparison
     local boot_mount_clean="${BOOT_MOUNT%/}"
@@ -751,20 +787,31 @@ recreate_swap() {
         local swap_size
         swap_size=$(stat -c %s "$swapfile")
         
-        # Create swapfile using dd for physical allocation
-        # fallocate can create holes which some kernels/filesystems dislike for swap
-        local swap_mb=$(( (swap_size + 1048575) / 1048576 ))
-        log "INFO" "Allocating ${swap_mb}MB for swapfile..."
+        log "INFO" "Allocating $(numfmt --to=iec-i --suffix=B "$swap_size") for swapfile..."
+        # fallocate is near-instant on ext4 and produces a proper non-sparse file
+        # suitable for use as swap (supported since kernel 4.0).
+        # Fall back to dd only if fallocate is unavailable or unsupported by the fs.
+        local alloc_ok=false
+        if command -v fallocate >/dev/null 2>&1; then
+            if fallocate -l "$swap_size" "$DST_MOUNT_ROOT$swapfile"; then
+                alloc_ok=true
+            else
+                log "WARN" "fallocate failed (filesystem may not support it). Falling back to dd..."
+                rm -f "$DST_MOUNT_ROOT$swapfile"
+            fi
+        fi
+        if [[ "$alloc_ok" == false ]]; then
+            local swap_mb=$(( (swap_size + 1048575) / 1048576 ))
+            dd if=/dev/zero of="$DST_MOUNT_ROOT$swapfile" bs=1M count="$swap_mb" && alloc_ok=true || true
+            [[ "$alloc_ok" == true ]] && truncate -s "$swap_size" "$DST_MOUNT_ROOT$swapfile"
+        fi
 
-        if dd if=/dev/zero of="$DST_MOUNT_ROOT$swapfile" bs=1M count="$swap_mb"; then
-            # Truncate to exact size if needed
-            truncate -s "$swap_size" "$DST_MOUNT_ROOT$swapfile"
-            
+        if [[ "$alloc_ok" == true ]]; then
             chmod 600 "$DST_MOUNT_ROOT$swapfile"
             mkswap "$DST_MOUNT_ROOT$swapfile" >/dev/null
             log "INFO" "Swapfile recreated successfully ($(numfmt --to=iec-i --suffix=B "$swap_size"))."
         else
-            log "WARN" "Failed to recreate swapfile (dd failed). Skipping."
+            log "WARN" "Failed to allocate swapfile. Skipping."
         fi
     fi
 }
@@ -773,81 +820,91 @@ recreate_swap() {
 verify_backup() {
     log "INFO" "=== Verifying Backup Configuration ==="
 
-    local root_uuid
+    local root_uuid root_partuuid
     root_uuid=$(get_uuid "$DST_PART2")
-    local root_partuuid
     root_partuuid=$(get_partuuid "$DST_PART2")
 
-    # Check fstab (ignore comments) — use grep -F for fixed-string matching (no regex injection)
+    local failures=0
+
+    # Check fstab — use grep -F for fixed-string matching (no regex injection risk).
     if grep -v "^[[:space:]]*#" "$DST_MOUNT_ROOT/etc/fstab" | grep -qF -e "$root_uuid" -e "$root_partuuid"; then
-        log "INFO" "[PASS] fstab contains new Root UUID/PARTUUID"
+        log "INFO" "[PASS] fstab contains new root UUID/PARTUUID."
     else
-        log "ERROR" "[FAIL] fstab missing new Root UUID/PARTUUID!"
+        log "ERROR" "[FAIL] fstab does not contain the new root UUID/PARTUUID."
+        ((failures++))
     fi
 
-    # Check cmdline.txt (if exists)
-    if [[ -f "$DST_MOUNT_ROOT/boot/firmware/cmdline.txt" ]]; then
-         if grep -qF "$root_partuuid" "$DST_MOUNT_ROOT/boot/firmware/cmdline.txt"; then
-            log "INFO" "[PASS] cmdline.txt updated with new Root PARTUUID"
-         else
-            log "ERROR" "[FAIL] cmdline.txt missing new Root PARTUUID!"
-         fi
+    # Check cmdline.txt (RPi); path is boot-mount-relative, same as update_destination_config.
+    local dst_cmdline="$DST_MOUNT_ROOT$BOOT_MOUNT/cmdline.txt"
+    if [[ -f "$dst_cmdline" ]]; then
+        if grep -qF "$root_partuuid" "$dst_cmdline"; then
+            log "INFO" "[PASS] cmdline.txt updated with new root PARTUUID."
+        else
+            log "ERROR" "[FAIL] cmdline.txt does not contain the new root PARTUUID."
+            ((failures++))
+        fi
     fi
 
-    # Check systemd-boot entries (primary path, then fallback)
+    # Check systemd-boot entries (primary path, then fallback).
     local loader_entries_dir="$DST_MOUNT_ROOT$BOOT_MOUNT/loader/entries"
     local alt_loader_dir="$DST_MOUNT_ROOT/boot/loader/entries"
-
     _verify_loader_entries "$loader_entries_dir" "$root_uuid" "$root_partuuid" "" ||
         _verify_loader_entries "$alt_loader_dir" "$root_uuid" "$root_partuuid" "(fallback)" || true
+
+    if (( failures > 0 )); then
+        die "Verification failed: $failures check(s) did not pass. The cloned system may not boot."
+    fi
+
+    log "INFO" "All verification checks passed."
 }
 
 ###################
 # Main Execution
 ###################
 
-check_root
-check_dependencies
+main() {
+    setup_signal_handlers
+    check_root
+    check_dependencies
 
-select_disks
+    select_disks
 
-echo "=============================================="
-echo " Source:      $SRC_DEVICE ($SRC_TABLE_TYPE)"
-echo " Destination: $DST_DEVICE"
-echo "=============================================="
-echo "WARNING: ALL DATA ON $DST_DEVICE WILL BE ERASED!"
-echo "=============================================="
+    echo "=============================================="
+    echo " Source:      $SRC_DEVICE ($SRC_TABLE_TYPE)"
+    echo " Destination: $DST_DEVICE"
+    echo "=============================================="
+    echo "WARNING: ALL DATA ON $DST_DEVICE WILL BE ERASED!"
+    echo "=============================================="
 
-# Check if destination looks like an existing backup
-# We check if partitions exist and if we can mount root and find an fstab.
-declare is_backup=false
-if [[ -b "$DST_PART1" ]] && [[ -b "$DST_PART2" ]]; then
-    declare tmp_check
-    tmp_check=$(mktemp -d)
-    if mount "$DST_PART2" "$tmp_check" 2>/dev/null; then
-        if [[ -f "$tmp_check/etc/fstab" ]]; then
-            is_backup=true
+    # Detect whether the destination already contains a cloneable system by
+    # probing for a valid fstab on its second partition.
+    local is_backup=false
+    if [[ -b "$DST_PART1" ]] && [[ -b "$DST_PART2" ]]; then
+        local tmp_check
+        tmp_check=$(mktemp -d)
+        if mount "$DST_PART2" "$tmp_check" 2>/dev/null; then
+            [[ -f "$tmp_check/etc/fstab" ]] && is_backup=true
+            umount "$tmp_check"
         fi
-        umount "$tmp_check"
+        rm -rf "$tmp_check"
     fi
-    rm -rf "$tmp_check"
-fi
 
-if [[ "$is_backup" == true ]]; then
-    log "INFO" "Destination appears to be an existing system/backup."
-    read -p "Perform INCREMENTAL update? (y/n - 'n' triggers FULL wipe): " -r
-    if [[ $REPLY =~ ^[Yy]$ ]]; then
-        perform_incremental_update
-        exit 0
+    if [[ "$is_backup" == true ]]; then
+        log "INFO" "Destination appears to contain an existing system/backup."
+        read -p "Perform INCREMENTAL update? (y/n — 'n' triggers FULL wipe): " -r
+        if [[ $REPLY =~ ^[Yy]$ ]]; then
+            perform_incremental_update
+            return 0
+        fi
     fi
-fi
 
-read -p "Perform FULL BACKUP (Wipe & Clone)? (yes/no): " -r
-if [[ $REPLY =~ ^yes$ ]]; then
-    perform_full_backup
-else
-    log "WARN" "Aborted."
-    exit 0
-fi
+    read -p "Perform FULL BACKUP (Wipe & Clone)? (yes/no): " -r
+    if [[ $REPLY =~ ^yes$ ]]; then
+        perform_full_backup
+    else
+        log "WARN" "Aborted by user."
+        return 0
+    fi
+}
 
-exit 0
+main "$@"
