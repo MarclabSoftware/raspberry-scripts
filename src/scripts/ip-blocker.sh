@@ -41,8 +41,8 @@
 #   DNS_SERVERS    Custom DNS servers for early-boot resolution (e.g. "8.8.8.8 1.1.1.1")
 #
 # Author: LaboDJ
-# Version: 5.7
-# Last Updated: 2026/03/24
+# Version: 5.8
+# Last Updated: 2026/03/25
 ###############################################################################
 
 # Enable strict mode:
@@ -135,12 +135,24 @@ declare -A RESOLVED_HOSTS_CACHE
 ###################
 # Error Handling & Logging
 ###################
+#
+# NOTE (DRY): handle_error, log, die, and _resolve_hostname are intentionally
+# duplicated from geo_ip_downloader.sh. Per the project architecture, scripts are
+# fully standalone with no shared library. Any changes here must be mirrored
+# in geo_ip_downloader.sh and vice versa.
+#
 
-# Generic error handler, triggered by 'trap ... ERR'
+# Generic error handler, triggered by 'trap ... ERR'.
+# @param $1 The line number where the error occurred (passed as $LINENO from the trap).
 handle_error() {
     local exit_code=$?
     local line_number=$1
-    log "ERROR" "Script failed at line $line_number with exit code $exit_code"
+    local i stack_trace=""
+    for ((i = 1; i < ${#FUNCNAME[@]}; i++)); do
+        stack_trace+="${FUNCNAME[$i]}(L${BASH_LINENO[$((i-1))]})"
+        ((i < ${#FUNCNAME[@]} - 1)) && stack_trace+=" → "
+    done
+    log "ERROR" "Script failed at line $line_number with exit code $exit_code | stack: $stack_trace"
     exit "$exit_code"
 }
 
@@ -591,10 +603,18 @@ download_blocklists() {
                 fi
 
                 log "INFO" "Downloading: $url"
-                # Capture curl stderr so errors appear in our structured log format
-                # instead of raw lines that journald may split across entries.
-                local curl_err
-                if ! curl_err=$(curl -fsSL "${resolve_opts[@]}" -OJ --connect-timeout 15 --max-time 90 "$url" 2>&1); then
+                # Build a human-readable output filename from the last path component
+                # of the URL, with a short hash suffix to guarantee uniqueness across
+                # sources that happen to share the same filename.
+                # Query strings are stripped before extracting the basename.
+                # Example: https://example.com/lists/cn.txt → cn.txt_a3f2b1c4
+                local url_path url_name url_hash outfile curl_err
+                url_path="${url%%\?*}"
+                url_name="${url_path##*/}"
+                url_name="${url_name//[^a-zA-Z0-9._-]/_}"
+                url_hash=$(printf '%s' "$url" | md5sum | cut -c1-8)
+                outfile="${url_name:+${url_name}_}${url_hash}"
+                if ! curl_err=$(curl -fsSL "${resolve_opts[@]}" -o "$outfile" --connect-timeout 15 --max-time 90 "$url" 2>&1); then
                     log "WARN" "Failed to download $url: ${curl_err%%$'\n'*}"
                 fi
             ) &
@@ -903,17 +923,10 @@ COMMIT
 -A LABO_INPUT -i wg+ -j ACCEPT
 
 # SSH Brute Force Mitigation (IPv4)
-# Three-rule pattern (intentional):
-#   Rule 1 (--set):    records every new connection attempt in the 'SSH' table.
-#   Rule 2 (--update + LOG): checks the threshold; --update also refreshes the
-#                     sliding window so the clock restarts on each attempt above
-#                     the limit. No DROP here so the packet continues to rule 3.
-#   Rule 3 (--update + DROP): re-checks and drops. Two separate --update calls
-#                     are required because iptables targets are terminal within
-#                     a rule (LOG does not stop evaluation by itself).
--A LABO_INPUT -p tcp --dport $SSH_PORT -m state --state NEW -m recent --set --name SSH --rsource
--A LABO_INPUT -p tcp --dport $SSH_PORT -m state --state NEW -m recent --update --seconds 10 --hitcount 10 --name SSH --rsource -j LOG --log-prefix "SSH BRUTE DROP: "
--A LABO_INPUT -p tcp --dport $SSH_PORT -m state --state NEW -m recent --update --seconds 10 --hitcount 10 --name SSH --rsource -j DROP
+# Drop new connections from a source IP exceeding 10/second.
+# Uses hashlimit (same module as IPv6) for consistency across all backends.
+-A LABO_INPUT -p tcp --dport $SSH_PORT -m hashlimit --hashlimit-name ssh_v4_limit --hashlimit-mode srcip --hashlimit-above 10/second -j LOG --log-prefix "SSH BRUTE DROP: "
+-A LABO_INPUT -p tcp --dport $SSH_PORT -m hashlimit --hashlimit-name ssh_v4_limit --hashlimit-mode srcip --hashlimit-above 10/second -j DROP
 -A LABO_INPUT -j ACCEPT
 
 # --- LABO_DOCKER_USER Chain (Forwarding) ---
@@ -963,7 +976,13 @@ EOF
     # Hook into system chains
     iptables -t mangle -I PREROUTING 1 -j LABO_PREROUTING
     iptables -I INPUT 1 -j LABO_INPUT
-    iptables -I DOCKER-USER 1 -j LABO_DOCKER_USER
+    # DOCKER-USER is created by the Docker daemon on startup; it does not exist
+    # on systems without Docker or when the daemon is stopped.
+    if iptables -L DOCKER-USER >/dev/null 2>&1; then
+        iptables -I DOCKER-USER 1 -j LABO_DOCKER_USER
+    else
+        log "WARN" "iptables DOCKER-USER chain not found (Docker not running?). Container FORWARD protection inactive."
+    fi
     iptables -t nat -I POSTROUTING 1 -j LABO_POSTROUTING
 
     log "INFO" "iptables (IPv4) rules applied successfully."
@@ -1053,7 +1072,11 @@ EOF
 
             ip6tables -t mangle -I PREROUTING 1 -j LABO_PREROUTING_V6
             ip6tables -I INPUT 1 -j LABO_INPUT_V6
-            ip6tables -I DOCKER-USER 1 -j LABO_DOCKER_USER_V6
+            if ip6tables -L DOCKER-USER >/dev/null 2>&1; then
+                ip6tables -I DOCKER-USER 1 -j LABO_DOCKER_USER_V6
+            else
+                log "WARN" "ip6tables DOCKER-USER chain not found (Docker not running?). IPv6 container FORWARD protection inactive."
+            fi
 
             log "INFO" "ip6tables (IPv6) rules applied successfully."
         else
@@ -1131,13 +1154,23 @@ apply_rules_nftables() {
         fi
     fi
 
-    # --- Generate atomic ruleset ---
-    log "INFO" "Generating atomic nftables ruleset..."
-    log "INFO" "Flushing existing $NFT_TABLE_NAME table..."
-    nft delete table inet $NFT_TABLE_NAME 2>/dev/null || true
+    # --- Backup, Generate, and Apply Ruleset ---
+    # Save the current table before modifying kernel state so it can be restored
+    # if application fails. nft list table is used (not list ruleset) to avoid
+    # capturing third-party tables (e.g. Docker) in the backup.
+    local nft_backup_file="$TEMP_DIR/nft_backup.nft"
+    if nft list table inet "$NFT_TABLE_NAME" > "$nft_backup_file" 2>/dev/null && [[ -s "$nft_backup_file" ]]; then
+        log "INFO" "Existing $NFT_TABLE_NAME table backed up to $nft_backup_file (rollback available on failure)."
+    else
+        nft_backup_file=""
+        log "INFO" "No existing $NFT_TABLE_NAME table found; rollback unavailable for this run."
+    fi
 
-    # We construct the config stream dynamically to inject the files.
-    # This subshell outputs the entire valid NFTables configuration.
+    # Write the complete ruleset to a temp file before touching kernel state.
+    # Building to a file (vs. directly piping to nft) ensures that a failure in
+    # the subshell cannot leave the firewall in a half-applied state.
+    local nft_config_file="$TEMP_DIR/nft_ruleset.nft"
+    log "INFO" "Generating nftables ruleset..."
     (
         # Derive nftables set elements from the PRIVATE_NETS_* constants (single source of truth).
         local priv_v4_elems priv_v6_elems
@@ -1268,9 +1301,9 @@ EOF
                 type filter hook forward priority filter; policy accept;
 EOF
         if [[ -n "$ft_devs" ]]; then
-             echo '                # Offload established connections to flowtable'
-             echo '                # This bypasses the classic Linux network stack for high throughput.'
-             echo '                ip protocol { tcp, udp } flow offload @f'
+             echo '                # Offload established TCP/UDP flows (IPv4 and IPv6) to the flowtable.'
+             echo '                # meta l4proto matches both address families; ip protocol would silently skip IPv6.'
+             echo '                meta l4proto { tcp, udp } flow offload @f'
         fi
         cat <<EOF
 
@@ -1332,10 +1365,30 @@ EOF
             }  
         }
 EOF
-    ) | nft -f -
+    ) > "$nft_config_file"
     # Note: -o (optimize) is intentionally omitted because it conflicts with 'auto-merge'
     # and causes "File exists" errors. 'auto-merge' combined with 'iprange' already
     # ensures the sets are optimized in the kernel.
+
+    [[ -s "$nft_config_file" ]] || die "Generated nftables config is empty. Aborting to preserve existing rules."
+
+    # Remove the existing table, then atomically load the new config.
+    # If nft rejects the new config, restore the backup to prevent leaving the
+    # firewall in an unprotected state.
+    log "INFO" "Replacing $NFT_TABLE_NAME table..."
+    nft delete table inet "$NFT_TABLE_NAME" 2>/dev/null || true
+    if ! nft -f "$nft_config_file"; then
+        log "ERROR" "Failed to apply nftables config."
+        if [[ -n "$nft_backup_file" ]]; then
+            log "WARN" "Restoring previous $NFT_TABLE_NAME table from backup..."
+            nft -f "$nft_backup_file" \
+                && log "INFO" "Rollback successful. Previous ruleset restored." \
+                || log "ERROR" "Rollback FAILED. Firewall has no active rules. Immediate manual intervention required."
+        else
+            log "ERROR" "No backup available for rollback. Firewall has no active rules."
+        fi
+        die "nftables ruleset application failed."
+    fi
 
     log "INFO" "nftables ruleset applied successfully."
 }
