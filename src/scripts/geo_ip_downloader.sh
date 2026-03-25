@@ -27,8 +27,8 @@
 #   DNS_SERVERS    Custom DNS servers for early-boot resolution (e.g. "8.8.8.8 1.1.1.1")
 #
 # Author: LaboDJ
-# Version: 6.6
-# Last Updated: 2026/03/24
+# Version: 6.7
+# Last Updated: 2026/03/25
 ###############################################################################
 
 # Enable strict mode
@@ -69,13 +69,24 @@ declare -A RESOLVED_HOSTS_CACHE
 ###################
 # Error Handling & Logging
 ###################
+#
+# NOTE (DRY): handle_error, log, die, and _resolve_hostname are intentionally
+# duplicated from ip-blocker.sh. Per the project architecture, scripts are
+# fully standalone with no shared library. Any changes here must be mirrored
+# in ip-blocker.sh and vice versa.
+#
 
-# Generic error handler, triggered by 'trap ... ERR'
-# @param $1 The line number where the error occurred
+# Generic error handler, triggered by 'trap ... ERR'.
+# @param $1 The line number where the error occurred (passed as $LINENO from the trap).
 handle_error() {
     local exit_code=$?
     local line_number=$1
-    log "ERROR" "Script failed at line $line_number with exit code $exit_code"
+    local i stack_trace=""
+    for ((i = 1; i < ${#FUNCNAME[@]}; i++)); do
+        stack_trace+="${FUNCNAME[$i]}(L${BASH_LINENO[$((i-1))]})"
+        ((i < ${#FUNCNAME[@]} - 1)) && stack_trace+=" → "
+    done
+    log "ERROR" "Script failed at line $line_number with exit code $exit_code | stack: $stack_trace"
     exit "$exit_code"
 }
 
@@ -313,10 +324,14 @@ validate_and_move_generated_file() {
     fi
 
     # Check 3: Content Validity Check
-    # Ensure the file contains at least one valid-looking IP range or address.
-    # This prevents files with only garbage/html from being accepted.
+    # Ensure the file contains at least one valid-looking IP address, CIDR, or range.
+    # This prevents files with only garbage/HTML from being accepted.
+    # Accepted formats:
+    #   - CIDR:       1.2.3.0/24  or  2001:db8::/32
+    #   - Plain IP:   1.2.3.4     or  2001:db8::1
+    #   - IP Range:   1.2.3.4 - 5.6.7.8  (Nirsoft provider output, consumed by iprange)
     # We use -m 1 to stop at the first match for efficiency.
-    if ! grep -Eq -m 1 '^[0-9a-fA-F:.]+(/[0-9]+)?$' "$temp_file"; then
+    if ! grep -Eq -m 1 '^[0-9a-fA-F:.]+(/[0-9]+)?( - [0-9a-fA-F:.]+(/[0-9]+)?)?$' "$temp_file"; then
          log "WARN" "Generated $list_name list does not contain valid IP data. Ignoring."
          rm -f "$temp_file"
          return
