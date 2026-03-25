@@ -209,7 +209,7 @@ _patch_loader_entries() {
     local entries_found=false
     for entry in "$entries_dir"/*.conf; do
         entries_found=true
-        log "INFO" "Patching systemd-boot entry: $entry"
+        log "INFO" "Patching systemd-boot entry: $(basename "$entry")"
         if grep -q "root=" "$entry"; then
             sed -E -i "s/root=[^ ]+/root=PARTUUID=$new_partuuid/g" "$entry"
         fi
@@ -318,10 +318,11 @@ cleanup() {
 
             if [[ "$discard_max" != "0B" ]] && [[ "$discard_max" != "0" ]]; then
                 log "INFO" "Running fstrim on destination..."
-                fstrim -v "$DST_MOUNT_ROOT" || true
+                local trim_out
+                trim_out=$(fstrim -v "$DST_MOUNT_ROOT" 2>&1) && log "INFO" "fstrim root: $trim_out" || true
                 # Also trim the boot partition if it is still mounted.
                 if [[ -n "$BOOT_MOUNT" ]] && mountpoint -q "$DST_MOUNT_ROOT$BOOT_MOUNT" 2>/dev/null; then
-                    fstrim -v "$DST_MOUNT_ROOT$BOOT_MOUNT" 2>/dev/null || true
+                    trim_out=$(fstrim -v "$DST_MOUNT_ROOT$BOOT_MOUNT" 2>&1) && log "INFO" "fstrim boot: $trim_out" || true
                 fi
             else
                 log "INFO" "Skipping fstrim (not supported by device)."
@@ -445,8 +446,8 @@ perform_full_backup() {
     # 1. Wipe and Partition
     # We recreate the partition table to match the source type (MBR or GPT).
     log "INFO" "Wiping existing signatures..."
-    wipefs -a "$DST_DEVICE" || true # Force wipe, ignore errors if empty
-    
+    wipefs -a "$DST_DEVICE" >/dev/null 2>&1 || true
+
     log "INFO" "Creating partition table..."
     if [[ "$SRC_TABLE_TYPE" == "gpt" ]]; then
         # x86/UEFI: GPT with 1024 MiB ESP + root. All operations in one invocation
@@ -481,9 +482,9 @@ perform_full_backup() {
 
     # 2. Format
     log "INFO" "Formatting partitions..."
-    mkfs.vfat -F 32 -n "BOOT" "$DST_PART1"
-    mkfs.ext4 -F "${EXT4_OPTIONS[@]}" -i "$INODE_RATIO" -L "rootfs" "$DST_PART2"
-    
+    mkfs.vfat -F 32 -n "BOOT" "$DST_PART1" >/dev/null 2>&1
+    mkfs.ext4 -q -F "${EXT4_OPTIONS[@]}" -i "$INODE_RATIO" -L "rootfs" "$DST_PART2"
+
     # Wait for UUIDs to settle after formatting
     udevadm settle
 
