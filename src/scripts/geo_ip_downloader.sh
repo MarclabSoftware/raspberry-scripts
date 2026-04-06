@@ -13,7 +13,8 @@
 # - Parallel & Safe: Runs concurrent downloads and validates all lists to
 #   remove empty or unsafe entries (e.g., 0.0.0.0/0).
 # - Normalized Output: Generates standardized '.list.v4' and '.list.v6' files
-#   ready for consumption by 'ip-blocker.sh'.
+#   inside 'lists/allow/v4' and 'lists/allow/v6' respectively, ready for 
+#   consumption by 'ip-blocker.sh' via iprange >=2.0 directory loading.
 #
 # Usage:
 #   ./geo_ip_downloader.sh -c SYNTAX [-h]
@@ -27,8 +28,8 @@
 #   DNS_SERVERS    Custom DNS servers for early-boot resolution (e.g. "8.8.8.8 1.1.1.1")
 #
 # Author: LaboDJ
-# Version: 6.7
-# Last Updated: 2026/03/25
+# Version: 6.8
+# Last Updated: 2026/04/05
 ###############################################################################
 
 # Enable strict mode
@@ -46,8 +47,9 @@ set -Eeuo pipefail
 # Get the script's absolute directory
 SCRIPT_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" &>/dev/null && pwd)
 readonly SCRIPT_DIR
-# Define the output directory for allowed lists
-readonly ALLOW_DIR="$SCRIPT_DIR/lists/allow"
+# Define the output directories for allowed lists
+readonly ALLOW_DIR_V4="$SCRIPT_DIR/lists/allow/v4"
+readonly ALLOW_DIR_V6="$SCRIPT_DIR/lists/allow/v6"
 # Required commands for dependency checks (base set; provider-specific added later)
 readonly REQUIRED_COMMANDS=(curl grep sed awk cut)
 # Max concurrent download jobs for parallel processing
@@ -140,7 +142,7 @@ Usage: $0 -c PROVIDER:COUNTRIES_LIST[;PROVIDER2:LIST2...] [-h]
 
 Description:
     Downloads and parses Geo-IP lists from specified providers.
-    Generates standardized .list.v4 and .list.v6 files in the 'lists/allow' directory.
+    Generates standardized .list.v4 and .list.v6 files in the 'lists/allow/v4' and 'v6' directories.
 
 Options:
     -c syntax   Provider and country list specification. [Mandatory]
@@ -390,11 +392,11 @@ _download_country_ipdeny() {
     local code_lower="${code,,}"
 
     local V4_URL="https://www.ipdeny.com/ipblocks/data/aggregated/$code_lower-aggregated.zone"
-    local V4_OUT_FILE="$ALLOW_DIR/$code_lower.ipdeny.list.v4"
+    local V4_OUT_FILE="$STAGING_V4/$code_lower.ipdeny.list.v4"
     download_and_validate_simple "$V4_URL" "$V4_OUT_FILE" "IPv4 ($code)"
 
     local V6_URL="https://www.ipdeny.com/ipv6/ipaddresses/aggregated/$code_lower-aggregated.zone"
-    local V6_OUT_FILE="$ALLOW_DIR/$code_lower.ipdeny.list.v6"
+    local V6_OUT_FILE="$STAGING_V6/$code_lower.ipdeny.list.v6"
     download_and_validate_simple "$V6_URL" "$V6_OUT_FILE" "IPv6 ($code)"
 }
 export -f _download_country_ipdeny
@@ -471,8 +473,8 @@ download_provider_ripe() {
     for code in "${ripe_countries[@]}"; do
         local code_lower="${code,,}"
 
-        local v4_out="$ALLOW_DIR/$code_lower.ripe.list.v4"
-        local v6_out="$ALLOW_DIR/$code_lower.ripe.list.v6"
+        local v4_out="$STAGING_V4/$code_lower.ripe.list.v4"
+        local v6_out="$STAGING_V6/$code_lower.ripe.list.v6"
         local temp_v4="$v4_out.tmp"
         local temp_v6="$v6_out.tmp"
 
@@ -543,8 +545,8 @@ download_provider_ripe() {
     # 5. Validate and move all generated files
     for code in "${ripe_countries[@]}"; do
         local code_lower="${code,,}"
-        local v4_out="$ALLOW_DIR/$code_lower.ripe.list.v4"
-        local v6_out="$ALLOW_DIR/$code_lower.ripe.list.v6"
+        local v4_out="$STAGING_V4/$code_lower.ripe.list.v4"
+        local v6_out="$STAGING_V6/$code_lower.ripe.list.v6"
         
         # Retrieve temp files from our array
         local temp_v4="${temp_v4_files[$code]}"
@@ -563,8 +565,8 @@ download_provider_ripe() {
 _download_country_nirsoft() {
     local code="$1"
     local code_lower="${code,,}"
-    local V4_OUT_FILE="$ALLOW_DIR/$code_lower.nirsoft.list.v4"
-    local V6_OUT_FILE="$ALLOW_DIR/$code_lower.nirsoft.list.v6"
+    local V4_OUT_FILE="$STAGING_V4/$code_lower.nirsoft.list.v4"
+    local V6_OUT_FILE="$STAGING_V6/$code_lower.nirsoft.list.v6"
     local TEMP_V4_OUT_FILE="$V4_OUT_FILE.tmp"
     local list_name="IPv4 ($code, Nirsoft)"
     local URL="https://www.nirsoft.net/countryip/$code_lower.csv"
@@ -625,16 +627,20 @@ main() {
         die "DNS_SERVERS is set but 'dig' (bind-tools/dnsutils) is not installed."
     fi
 
-    # 3. Create the output directory
-    mkdir -p "$ALLOW_DIR" || die "Failed to create directory: $ALLOW_DIR"
+    # 3. Create the output directories
+    mkdir -p "$ALLOW_DIR_V4" "$ALLOW_DIR_V6" || die "Failed to create directories"
 
-    # 4. Create shared temp directory for providers that need it (RIPE, Nirsoft)
+    # 4. Create shared temp directory and staging sub-directories
     TEMP_DIR=$(mktemp -d) || die "Failed to create temp directory"
+    readonly STAGING_V4="$TEMP_DIR/staging_v4"
+    readonly STAGING_V6="$TEMP_DIR/staging_v6"
+    mkdir -p "$STAGING_V4" "$STAGING_V6"
 
-    # 5. Clean up any lists from a previous run
-    log "INFO" "Cleaning old downloaded lists from $ALLOW_DIR"
-    rm -f "$ALLOW_DIR"/*.list.v4
-    rm -f "$ALLOW_DIR"/*.list.v6
+    # Export staging paths for sub-functions
+    export STAGING_V4 STAGING_V6
+
+    # 5. Prepare for fresh downloads
+    log "INFO" "Preparing staging area for fresh downloads..."
 
     # 6. Parse the new syntax
     log "INFO" "Parsing provider/country syntax: $ALLOWED_COUNTRIES_SYNTAX"
@@ -713,21 +719,28 @@ main() {
         esac
     done
 
-    # 9. Final Validation
-    # This is a critical safety net. If *all* downloads failed
-    # (e.g., provider is down, no internet), we must abort.
-    log "INFO" "Final check for generated lists..."
+    # 9. Final Validation and Atomic Swap
+    log "INFO" "Final check for generated lists in staging..."
 
-    # 'find' is safer than 'ls' for this.
-    # We just need to know if *at least one* file was created.
     local file_count
-    file_count=$(find "$ALLOW_DIR" -maxdepth 1 \( -name "*.list.v4" -o -name "*.list.v6" \) -print 2>/dev/null | wc -l)
+    file_count=$(find "$STAGING_V4" "$STAGING_V6" -maxdepth 1 \( -name "*.list.v4" -o -name "*.list.v6" \) -print 2>/dev/null | wc -l)
 
     if [[ $file_count -eq 0 ]]; then
-        die "DOWNLOAD FAILED. No Geo-IP lists were generated (provider unreachable?). Aborting to preserve existing firewall rules."
+        die "DOWNLOAD FAILED. No Geo-IP lists were generated (provider unreachable?). Aborting to preserve existing firewall rules (CACHE SAFE)."
     fi
 
-    log "INFO" "All country lists processed successfully."
+    log "INFO" "Download successful ($file_count lists). Performing atomic swap..."
+
+    # Clean OLD lists
+    rm -f "$ALLOW_DIR_V4"/*.list.v4 2>/dev/null || true
+    rm -f "$ALLOW_DIR_V6"/*.list.v6 2>/dev/null || true
+
+    # Move NEW lists from staging
+    # Use 'find' and 'mv' to be robust against empty staging subdirs
+    find "$STAGING_V4" -name "*.list.v4" -exec mv -t "$ALLOW_DIR_V4" {} + 2>/dev/null || true
+    find "$STAGING_V6" -name "*.list.v6" -exec mv -t "$ALLOW_DIR_V6" {} + 2>/dev/null || true
+
+    log "INFO" "All country lists updated successfully."
 }
 
 # Pass all command-line arguments to the main function
