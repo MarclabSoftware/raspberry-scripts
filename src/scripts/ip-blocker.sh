@@ -11,7 +11,7 @@
 # Core Features:
 # - Auto-Backend: Prefers 'nftables', falls back to 'iptables'/'ipset'.
 # - Geo-IP Filtering: Full IPv4 & optional IPv6. Supports multiple providers
-#   (ipdeny, ripe, nirsoft) and manual 'lists/allow/*.v4' files.
+#   (ipdeny, ripe, nirsoft) and manual 'lists/allow/v4/*.v4' files via iprange 2.0.
 # - Flowtable Offload: Hardware/Software offload for established connections
 #   (nftables only) to boost throughput and reduce CPU load.
 # - Default Deny Policy: Secures the host (INPUT) while safely filtering
@@ -41,8 +41,8 @@
 #   DNS_SERVERS    Custom DNS servers for early-boot resolution (e.g. "8.8.8.8 1.1.1.1")
 #
 # Author: LaboDJ
-# Version: 5.8
-# Last Updated: 2026/03/25
+# Version: 5.9
+# Last Updated: 2026/04/05
 ###############################################################################
 
 # Enable strict mode:
@@ -66,8 +66,11 @@ declare -r SCRIPT_DIR
 declare -r COUNTRY_IPS_DOWNLOADER="$SCRIPT_DIR/geo_ip_downloader.sh"
 # Directory structure
 declare -r IP_LIST_DIR="$SCRIPT_DIR/lists"
-declare -r ALLOW_LIST_DIR="$IP_LIST_DIR/allow"
-declare -r BLOCK_LIST_DIR="$IP_LIST_DIR/block"
+declare -r ALLOW_LIST_DIR_V4="$IP_LIST_DIR/allow/v4"
+declare -r ALLOW_LIST_DIR_V6="$IP_LIST_DIR/allow/v6"
+declare -r BLOCK_LIST_DIR="$IP_LIST_DIR/block/raw"
+declare -r BLOCK_LIST_DIR_V4="$IP_LIST_DIR/block/v4"
+declare -r BLOCK_LIST_DIR_V6="$IP_LIST_DIR/block/v6"
 # URL for the v4 blocklist index
 declare -r BLOCK_LIST_URL="https://raw.githubusercontent.com/Adamm00/IPSet_ASUS/master/filter.list"
 declare -r BLOCK_LIST_FILE_NAME="$IP_LIST_DIR/blocklists.txt"
@@ -77,7 +80,6 @@ declare -r NFT_TABLE_NAME="labo_firewall"
 # Names for our sets/ipsets
 declare -r ALLOW_LIST_NAME_V4="allowlist_v4"
 declare -r ALLOW_LIST_NAME_V6="allowlist_v6"
-declare -r BLOCK_LIST_NAME_V6="blocklist_v6"
 # Geo-IP Provider settings
 # Default provider if -p is not used
 declare -r DEFAULT_PROVIDER="ipdeny"
@@ -120,15 +122,15 @@ declare TEMP_DIR=""
 # Final optimized IP list files (path is set in setup_temp_dir_and_traps)
 declare IP_RANGE_FILE_V4=""
 declare IP_RANGE_FILE_V6=""
-declare IP_RANGE_FILE_BLOCK_V6=""
 
 declare CLEANUP_REGISTERED=false
 declare FIREWALL_BACKEND=""
 declare -a REQUIRED_COMMANDS=()
 
 # Paths for clean intermediate lists
-declare BLOCK_LIST_CLEAN_V4_DIR=""
-declare BLOCK_LIST_CLEAN_V6_DIR=""
+# Paths for clean intermediate lists are now persistent
+declare BLOCK_LIST_CLEAN_V4_DIR="$BLOCK_LIST_DIR_V4"
+declare BLOCK_LIST_CLEAN_V6_DIR="$BLOCK_LIST_DIR_V6"
 # Cache for resolved hostnames to avoid redundant 'dig' calls
 declare -A RESOLVED_HOSTS_CACHE
 
@@ -281,7 +283,6 @@ setup_temp_dir_and_traps() {
     # 4. Set global paths for our temp files
     IP_RANGE_FILE_V4="$TEMP_DIR/$ALLOW_LIST_NAME_V4.iprange.txt"
     IP_RANGE_FILE_V6="$TEMP_DIR/$ALLOW_LIST_NAME_V6.iprange.txt"
-    IP_RANGE_FILE_BLOCK_V6="$TEMP_DIR/$BLOCK_LIST_NAME_V6.iprange.txt"
 
     # 5. Setup traps (now that TEMP_DIR and Lock are set)
     setup_signal_handlers
@@ -446,6 +447,16 @@ check_installed_commands() {
     # dig is required only when DNS_SERVERS is set (early-boot DNS override)
     if [[ -n "${DNS_SERVERS:-}" ]] && ! command -v dig >/dev/null 2>&1; then
         die "DNS_SERVERS is set but 'dig' (bind-tools/dnsutils) is not installed."
+    fi
+
+    # IP Range Runtime Version/Feature Check (Requires iprange >= 2.0.0)
+    local -a missing_features=()
+    iprange --has-ipv6 >/dev/null 2>&1 || missing_features+=("ipv6")
+    iprange --has-directory-loading >/dev/null 2>&1 || missing_features+=("directory-loading")
+    iprange --has-filelist-loading >/dev/null 2>&1 || missing_features+=("filelist-loading")
+
+    if [[ ${#missing_features[@]} -gt 0 ]]; then
+        die "iprange 2.0.0 or newer is required. Missing features: ${missing_features[*]}"
     fi
 }
 
@@ -666,10 +677,12 @@ separate_ip_families() {
         return
     fi
 
-    # Create directories for clean lists if they don't exist (using temp dir structure)
-    local v4_clean_dir="$TEMP_DIR/clean_v4"
-    local v6_clean_dir="$TEMP_DIR/clean_v6"
-    mkdir -p "$v4_clean_dir" "$v6_clean_dir"
+    # Clear persistent clean blocklists before new separation to avoid stale data
+    rm -f "$BLOCK_LIST_DIR_V4"/* "$BLOCK_LIST_DIR_V6"/* 2>/dev/null || true
+    mkdir -p "$BLOCK_LIST_DIR_V4" "$BLOCK_LIST_DIR_V6"
+    
+    local v4_clean_dir="$BLOCK_LIST_DIR_V4"
+    local v6_clean_dir="$BLOCK_LIST_DIR_V6"
 
     # Regex patterns — anchored to start of line to avoid partial matches in text/HTML.
     # IPv4: optional whitespace, then dotted-decimal with optional CIDR.
@@ -741,7 +754,7 @@ generate_ip_list() {
     # the previous successful run, which live persistently in $ALLOW_LIST_DIR.
     # Only die if the download fails AND no cache exists at all.
     if ! try_command "$COUNTRY_IPS_DOWNLOADER" -c "$downloader_countries_arg"; then
-        local cached_v4=("$ALLOW_LIST_DIR"/*.v4)
+        local cached_v4=("$ALLOW_LIST_DIR_V4"/*.v4)
         if [[ ${#cached_v4[@]} -gt 0 && -s "${cached_v4[0]}" ]]; then
             log "WARN" "Country IP download failed; using cached lists from previous run."
         else
@@ -750,19 +763,12 @@ generate_ip_list() {
     fi
 
     # --- Optimize IPv4 List ---
-    local v4_files=("$ALLOW_LIST_DIR"/*.v4)
-    local v4_block_files=()
-
-    if [[ "$USE_BLOCKLIST" == true && -n "$BLOCK_LIST_CLEAN_V4_DIR" ]]; then
-        v4_block_files=("$BLOCK_LIST_CLEAN_V4_DIR"/*)
-    fi
-
-    if [[ ${#v4_block_files[@]} -gt 0 ]]; then
-        log "INFO" "Optimizing IPv4 allow lists and subtracting ${#v4_block_files[@]} blocklists."
-        "${iprange_cmd[@]}" "${v4_files[@]}" --except "${v4_block_files[@]}" >"$IP_RANGE_FILE_V4"
+    if [[ "$USE_BLOCKLIST" == true && -d "$BLOCK_LIST_CLEAN_V4_DIR" && "$(ls -A "$BLOCK_LIST_CLEAN_V4_DIR")" ]]; then
+        log "INFO" "Optimizing IPv4 allow lists with native blocklist subtraction (@directory)..."
+        "${iprange_cmd[@]}" @"$ALLOW_LIST_DIR_V4" --except @"$BLOCK_LIST_CLEAN_V4_DIR" >"$IP_RANGE_FILE_V4"
     else
-        log "INFO" "Optimizing IPv4 allow lists (no blocklist)."
-        "${iprange_cmd[@]}" "${v4_files[@]}" >"$IP_RANGE_FILE_V4"
+        log "INFO" "Optimizing IPv4 allow lists..."
+        "${iprange_cmd[@]}" @"$ALLOW_LIST_DIR_V4" >"$IP_RANGE_FILE_V4"
     fi
 
     # CRITICAL safety check
@@ -775,16 +781,14 @@ generate_ip_list() {
         rm -f "$IP_RANGE_FILE_V6"
         return
     fi
-
-    log "INFO" "Combining and de-duplicating IPv6 allow lists..."
-    local v6_files=("$ALLOW_LIST_DIR"/*.v6)
-
-    if [[ ${#v6_files[@]} -gt 0 ]]; then
-        # iprange does not support IPv6.
-        # Concatenate, strip comments/whitespace, and sort unique.
-        sed -e 's/#.*//' -e 's/\r//' -e '/^[[:space:]]*$/d' "${v6_files[@]}" | sort -u > "$IP_RANGE_FILE_V6"
+    
+    log "INFO" "Optimizing IPv6 allow lists..."
+    if [[ "$USE_BLOCKLIST" == true && -d "$BLOCK_LIST_CLEAN_V6_DIR" && "$(ls -A "$BLOCK_LIST_CLEAN_V6_DIR")" ]]; then
+        log "INFO" "Optimizing IPv6 lists with native blocklist subtraction (@directory)..."
+        "${iprange_cmd[@]}" -6 @"$ALLOW_LIST_DIR_V6" --except @"$BLOCK_LIST_CLEAN_V6_DIR" > "$IP_RANGE_FILE_V6"
     else
-        : > "$IP_RANGE_FILE_V6"
+        log "INFO" "Optimizing IPv6 lists..."
+        "${iprange_cmd[@]}" -6 @"$ALLOW_LIST_DIR_V6" > "$IP_RANGE_FILE_V6"
     fi
 
     if [[ ! -s "$IP_RANGE_FILE_V6" ]]; then
@@ -793,18 +797,6 @@ generate_ip_list() {
     fi
 
     log "INFO" "IPv6 range list created at $IP_RANGE_FILE_V6"
-
-    # Generate IPv6 blocklist if enabled and available
-    if [[ "$USE_BLOCKLIST" == true && -n "$BLOCK_LIST_CLEAN_V6_DIR" ]]; then
-        local v6_block_files=("$BLOCK_LIST_CLEAN_V6_DIR"/*)
-        if [[ ${#v6_block_files[@]} -gt 0 ]]; then
-            log "INFO" "Generating IPv6 blocklist from ${#v6_block_files[@]} files..."
-            sed -e 's/[#;].*//' -e 's/\r//' -e '/^[[:space:]]*$/d' "${v6_block_files[@]}" | sort -u > "$IP_RANGE_FILE_BLOCK_V6"
-            log "INFO" "IPv6 blocklist created at $IP_RANGE_FILE_BLOCK_V6"
-        else
-            log "INFO" "No IPv6 blocklist files found (clean dir empty)."
-        fi
-    fi
 }
 
 ###############################################################################
@@ -993,10 +985,6 @@ EOF
         if [[ -s "$IP_RANGE_FILE_V6" ]]; then
             populate_ipset "$ALLOW_LIST_NAME_V6" "$IP_RANGE_FILE_V6" "inet6"
 
-            if [[ -s "$IP_RANGE_FILE_BLOCK_V6" ]]; then
-                populate_ipset "$BLOCK_LIST_NAME_V6" "$IP_RANGE_FILE_BLOCK_V6" "inet6"
-            fi
-
             # Cleanup IPv6
             log "INFO" "Cleaning up old ip6tables rules..."
             cleanup_iptables_chain ip6tables mangle  PREROUTING  LABO_PREROUTING_V6
@@ -1023,13 +1011,6 @@ EOF
 
 # CRITICAL: ICMPv6 must be accepted before GeoIP
 -A LABO_PREROUTING_V6 -p icmpv6 -j ACCEPT
-
-# Blocklist IPv6 (Drop)
-EOF
-            if [[ -s "$IP_RANGE_FILE_BLOCK_V6" ]]; then
-               echo "-A LABO_PREROUTING_V6 -m set --match-set $BLOCK_LIST_NAME_V6 src -j DROP" >> "$ip6tables_rules_file"
-            fi
-            cat >> "$ip6tables_rules_file" <<-EOF
 
 # Geo-IP Filter (DROP)
 -A LABO_PREROUTING_V6 -m set ! --match-set $ALLOW_LIST_NAME_V6 src -j DROP
@@ -1133,24 +1114,16 @@ apply_rules_nftables() {
     fi
 
     local v6_elements_file="$TEMP_DIR/v6_elements.nft"
-    local v6_block_elements_file="$TEMP_DIR/v6_block_elements.nft"
     if [[ "$GEOBLOCK_IPV6" == true ]]; then
         # Process Allowlist
         if [[ -s "$IP_RANGE_FILE_V6" ]]; then
             # Filter valid IPv6 chars only (hex, colon, slash) and join
             grep -E '^[0-9a-fA-F:/]+$' "$IP_RANGE_FILE_V6" | paste -s -d, > "$v6_elements_file" || true
         fi
-        
-        # Verify Allowlist is not empty (after filtering), fallback if needed
+        # Ensure Allowlist is securely set before application
         if [[ ! -s "$v6_elements_file" ]]; then
             log "WARN" "IPv6 allowlist is empty (or containing only invalid entries). Using dummy IP."
             echo "2001:db8::1" > "$v6_elements_file"  # RFC 3849 documentation prefix
-        fi
-
-        # Process Blocklist
-        if [[ -s "$IP_RANGE_FILE_BLOCK_V6" ]]; then
-             # Filter valid IPv6 chars only (hex, colon, slash) and join
-            grep -E '^[0-9a-fA-F:/]+$' "$IP_RANGE_FILE_BLOCK_V6" | paste -s -d, > "$v6_block_elements_file" || true
         fi
     fi
 
@@ -1218,18 +1191,6 @@ EOF
                 }
             }
 EOF
-            if [[ -s "$v6_block_elements_file" ]]; then
-                cat <<EOF
-            set $BLOCK_LIST_NAME_V6 {
-                type ipv6_addr; flags interval; auto-merge;
-                elements = {
-EOF
-                cat "$v6_block_elements_file"
-                cat <<EOF
-                }
-            }
-EOF
-            fi
         fi
 
         # --- Flowtable Definition ---
@@ -1285,10 +1246,6 @@ EOF
                 # 5. Geo-IP v6 Filter (DROP, if enabled)
 EOF
         if [[ "$GEOBLOCK_IPV6" == true ]]; then
-             if [[ -s "$v6_block_elements_file" ]]; then
-                 echo '                ip6 saddr @'"$BLOCK_LIST_NAME_V6"' limit rate 30/minute burst 10 packets log prefix "PREROUTING6 BLOCK-DROP: "'
-                 echo '                ip6 saddr @'"$BLOCK_LIST_NAME_V6"' counter drop'
-             fi
             echo '                ip6 nexthdr != icmpv6 ip6 saddr != @'"$ALLOW_LIST_NAME_V6"' limit rate 30/minute burst 10 packets log prefix "PREROUTING6 GEO-DROP: "'
             echo '                ip6 nexthdr != icmpv6 ip6 saddr != @'"$ALLOW_LIST_NAME_V6"' counter drop'
         fi
@@ -1414,7 +1371,7 @@ main() {
     check_installed_commands
 
     # 6. Create directories
-    mkdir -p "$ALLOW_LIST_DIR" "$BLOCK_LIST_DIR" || die "Failed to create directories"
+    mkdir -p "$ALLOW_LIST_DIR_V4" "$ALLOW_LIST_DIR_V6" "$BLOCK_LIST_DIR" "$BLOCK_LIST_DIR_V4" "$BLOCK_LIST_DIR_V6" || die "Failed to create directories"
 
     # 7. Download v4 blocklists if -b is used.
     # Non-fatal: if the remote index is unreachable (transient DNS/network issue),
