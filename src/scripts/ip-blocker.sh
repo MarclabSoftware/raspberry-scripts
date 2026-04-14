@@ -126,6 +126,8 @@ declare IP_RANGE_FILE_V6=""
 declare CLEANUP_REGISTERED=false
 declare FIREWALL_BACKEND=""
 declare -a REQUIRED_COMMANDS=()
+declare URL_PARSE_HOST=""
+declare URL_PARSE_PORT=""
 
 # Paths for clean intermediate lists
 # Paths for clean intermediate lists are now persistent
@@ -179,17 +181,28 @@ _resolve_hostname() {
 
     local -a ips=()
     local -a servers=()
+    local -a resolved=()
+    local -a rrtypes=(A AAAA)
+    local ip
+    local rrtype
     if [[ -n "${DNS_SERVERS:-}" ]]; then
         read -ra servers <<< "${DNS_SERVERS:-}"
     fi
 
     # Try each DNS server until one succeeds
     for ns in "${servers[@]}"; do
-        # Extract IPv4 (A) as it is the most common fallback needed.
-        local res
-        res=$(dig +short "@$ns" "$host" A 2>/dev/null | grep -E '^[0-9.]+$' || true)
-        if [[ -n "$res" ]]; then
-            while read -r ip; do ips+=("$ip"); done <<< "$res"
+        for rrtype in "${rrtypes[@]}"; do
+            mapfile -t resolved < <(dig +short "@$ns" "$host" "$rrtype" 2>/dev/null || true)
+            for ip in "${resolved[@]}"; do
+                if [[ "$rrtype" == "A" ]]; then
+                    [[ "$ip" == *.*.*.* ]] || continue
+                else
+                    [[ "$ip" == *:* ]] || continue
+                fi
+                ips+=("$ip")
+            done
+        done
+        if [[ ${#ips[@]} -gt 0 ]]; then
             break # Stop at first successful resolver
         fi
     done
@@ -200,6 +213,89 @@ _resolve_hostname() {
     fi
 }
 export -f _resolve_hostname
+
+# Parses an HTTP(S) URL into host and port using shell parameter expansion only.
+parse_url_endpoint() {
+    local url="$1"
+    local endpoint default_port
+
+    endpoint="${url#*://}"
+    endpoint="${endpoint%%/*}"
+    endpoint="${endpoint%%\?*}"
+    endpoint="${endpoint%%#*}"
+    endpoint="${endpoint##*@}"
+    default_port=80
+    [[ "$url" == https://* ]] && default_port=443
+
+    URL_PARSE_HOST="$endpoint"
+    URL_PARSE_PORT="$default_port"
+
+    if [[ "$endpoint" == \[*\]* ]]; then
+        URL_PARSE_HOST="${endpoint#\[}"
+        URL_PARSE_HOST="${URL_PARSE_HOST%%]*}"
+        if [[ "$endpoint" == *]:* ]]; then
+            URL_PARSE_PORT="${endpoint##*:}"
+        fi
+        return 0
+    fi
+
+    if [[ "$endpoint" == *:* ]]; then
+        URL_PARSE_HOST="${endpoint%%:*}"
+        URL_PARSE_PORT="${endpoint##*:}"
+    fi
+}
+
+# Builds curl --resolve options for DNS_SERVERS override with minimal process overhead.
+build_resolve_options_for_url() {
+    local url="$1"
+    local result_var="$2"
+    local -a options=()
+    local -a ips=()
+    local ip
+    local resolve_ip
+
+    [[ -n "${DNS_SERVERS:-}" ]] || { printf -v "$result_var" '%s' ""; return 0; }
+
+    parse_url_endpoint "$url"
+    read -ra ips <<< "$(_resolve_hostname "$URL_PARSE_HOST")"
+    for ip in "${ips[@]}"; do
+        resolve_ip="$ip"
+        [[ "$resolve_ip" == *:* ]] && resolve_ip="[$resolve_ip]"
+        options+=("--resolve" "$URL_PARSE_HOST:$URL_PARSE_PORT:$resolve_ip")
+    done
+
+    printf -v "$result_var" '%s' "${options[*]-}"
+}
+
+# Cheap HTML/XML detector without spawning head/grep for every file.
+file_has_markup_header() {
+    local file="$1"
+    local line
+    local checked=0
+
+    while IFS= read -r line && ((checked < 50)); do
+        line="${line,,}"
+        [[ -z "${line//[[:space:]]/}" ]] && continue
+        ((checked++))
+        if [[ "$line" == *'<!doctype'* || "$line" == *'<?xml'* || "$line" == *'<!--'* || "$line" == *'<html'* || "$line" == *'<head'* || "$line" == *'<body'* ]]; then
+            return 0
+        fi
+    done < "$file"
+
+    return 1
+}
+
+# Waits until the shell has fewer than the requested number of running jobs.
+wait_for_job_slot_limit() {
+    local max_jobs="$1"
+    local -a running_jobs=()
+
+    while :; do
+        mapfile -t running_jobs < <(jobs -pr)
+        ((${#running_jobs[@]} < max_jobs)) && return 0
+        wait -n || true
+    done
+}
 
 # Setup signal traps for robust execution and cleanup
 setup_signal_handlers() {
@@ -218,7 +314,7 @@ setup_signal_handlers() {
 # Standardized logging function
 log() {
     # Uses printf builtin %()T for timestamp (no subshell, no external process)
-    printf '[%(%Y-%m-%d %H:%M:%S)T] [%s] [PID:%d] %s\n' -1 "$1" "$$" "$2" >&2
+    printf '[%(%Y-%m-%d %H:%M:%S)T] [%s] [PID:%d] %s\n' -1 "$1" "${BASHPID:-$$}" "$2" >&2
 }
 
 # Log an error and exit
@@ -276,9 +372,11 @@ setup_temp_dir_and_traps() {
     # Write our PID to the lock
     echo "$$" > "$LOCK_DIR/pid"
 
-    # 3. Create secure temp directory
-    # -t: creates in $TMPDIR or /tmp, with a template
-    TEMP_DIR=$(mktemp -d -t ipblocker.XXXXXX) || die "Failed to create secure temp directory"
+    # 3. Create secure temp directory under the persistent list root.
+    # Keeping staging on the same filesystem as the target directories preserves
+    # O(1) rename semantics for our directory swaps.
+    mkdir -p "$IP_LIST_DIR" || die "Failed to prepare list root directory"
+    TEMP_DIR=$(mktemp -d "$IP_LIST_DIR/.ipblocker.XXXXXX") || die "Failed to create secure temp directory"
 
     # 4. Set global paths for our temp files
     IP_RANGE_FILE_V4="$TEMP_DIR/$ALLOW_LIST_NAME_V4.iprange.txt"
@@ -341,14 +439,14 @@ parse_arguments() {
         die "SSH port must be a number between 1 and 65535"
     fi
     # Normalize: strip any trailing separators the user may have left (e.g. "ipdeny:IT;")
+    ALLOWED_COUNTRIES="${ALLOWED_COUNTRIES//[[:space:]]/}"
     ALLOWED_COUNTRIES="${ALLOWED_COUNTRIES%%;}"
     ALLOWED_COUNTRIES="${ALLOWED_COUNTRIES%%,}"
 
     # Validate country codes based on syntax
     if [[ "$ALLOWED_COUNTRIES" == *":"* ]]; then
         # Advanced syntax (e.g., "ripe:IT,FR;ipdeny:CN")
-        # Allows letters, commas, colons, and semicolons
-        local adv_regex='^[A-Za-z,;:]+$'
+        local adv_regex='^[A-Za-z]+:[A-Za-z]{2}(,[A-Za-z]{2})*(;[A-Za-z]+:[A-Za-z]{2}(,[A-Za-z]{2})*)*$'
         if [[ ! "$ALLOWED_COUNTRIES" =~ $adv_regex ]]; then
             die "Invalid advanced country syntax. Use format like 'provider:C1,C2;provider2:C3'"
         fi
@@ -382,12 +480,10 @@ check_connectivity() {
     while ((elapsed < CONNECTIVITY_MAX_WAIT)); do
         for site in "${CONNECTIVITY_CHECK_SITES[@]}"; do
             local -a resolve_opts=()
+            local resolve_opts_str=""
             if [[ -n "${DNS_SERVERS:-}" ]]; then
-                local -a ips=()
-                read -ra ips <<< "$(_resolve_hostname "$site")"
-                for ip in "${ips[@]}"; do
-                    resolve_opts+=("--resolve" "$site:443:$ip")
-                done
+                build_resolve_options_for_url "https://$site" resolve_opts_str
+                [[ -n "$resolve_opts_str" ]] && read -ra resolve_opts <<< "$resolve_opts_str"
             fi
 
             # -f: fail on HTTP error  --head: no body download
@@ -414,7 +510,8 @@ detect_backend() {
     log "INFO" "Detecting firewall backend..."
     if command -v nft &>/dev/null; then
         FIREWALL_BACKEND="nftables"
-        REQUIRED_COMMANDS=(curl iprange nft)
+        REQUIRED_COMMANDS=(curl iprange nft grep sed awk cp)
+        [[ "$USE_BLOCKLIST" == true ]] && REQUIRED_COMMANDS+=(cksum)
         log "INFO" "Backend selected: nftables (native)"
 
         # Pre-flight check: Verify nftables functionality
@@ -426,9 +523,10 @@ detect_backend() {
     elif command -v iptables &>/dev/null && command -v ipset &>/dev/null; then
         FIREWALL_BACKEND="iptables"
         # Dynamically add IPv6 tools only if needed
-        REQUIRED_COMMANDS=(curl ipset iptables iprange iptables-restore)
+        REQUIRED_COMMANDS=(curl ipset iptables iprange iptables-restore iptables-save grep sed awk cp)
+        [[ "$USE_BLOCKLIST" == true ]] && REQUIRED_COMMANDS+=(cksum)
         if [[ "$GEOBLOCK_IPV6" == true ]]; then
-             REQUIRED_COMMANDS+=(ip6tables ip6tables-restore)
+             REQUIRED_COMMANDS+=(ip6tables ip6tables-restore ip6tables-save)
         fi
         log "INFO" "Backend selected: iptables (legacy)"
     else
@@ -499,10 +597,186 @@ try_command() {
     return 1
 }
 
+restore_iptables_backup() {
+    local restore_cmd="$1"
+    local backup_file="$2"
+    local label="$3"
+
+    [[ -s "$backup_file" ]] || return 1
+
+    if "$restore_cmd" < "$backup_file"; then
+        log "INFO" "Rollback successful for $label."
+        return 0
+    fi
+
+    log "ERROR" "Rollback failed for $label."
+    return 1
+}
+
+blocklist_cache_name_from_url() {
+    local url="$1"
+    local scheme="${url%%:*}"
+    local normalized="${url#*://}"
+    local checksum=""
+    local cksum_output=""
+
+    normalized="${normalized##*@}"
+    normalized="${normalized%%#*}"
+    normalized="${normalized//[^A-Za-z0-9._-]/_}"
+    while [[ "$normalized" == *"__"* ]]; do
+        normalized="${normalized//__/_}"
+    done
+    normalized="${normalized##_}"
+    normalized="${normalized%%_}"
+
+    if ((${#normalized} > 220)); then
+        normalized="${normalized:0:140}_${normalized: -60}"
+    fi
+
+    if ! cksum_output=$(printf '%s' "$url" | cksum); then
+        die "Failed to derive stable cache key for blocklist URL: $url"
+    fi
+    checksum="${cksum_output%% *}"
+
+    printf '%s\n' "${scheme}_${normalized:-list}_${checksum}"
+}
+
+cached_blocklist_file_is_valid() {
+    local cached_file="$1"
+
+    [[ -s "$cached_file" ]] || return 1
+    ! file_has_markup_header "$cached_file"
+}
+
+backup_ipset_state() {
+    local set_name="$1"
+    local backup_file="$2"
+
+    if ipset list "$set_name" >/dev/null 2>&1; then
+        ipset save "$set_name" > "$backup_file" || die "Failed to back up ipset '$set_name'"
+    else
+        : > "$backup_file"
+    fi
+}
+
+restore_ipset_backup() {
+    local set_name="$1"
+    local backup_file="$2"
+    local restore_file="$TEMP_DIR/$set_name.rollback.restore"
+
+    if [[ -s "$backup_file" ]]; then
+        if ! awk '
+            $1 == "create" {
+                print $0 " -exist"
+                print "flush " $2
+                next
+            }
+            $1 == "add" { print }
+        ' "$backup_file" > "$restore_file"; then
+            log "ERROR" "Failed to prepare rollback payload for ipset '$set_name'."
+            return 1
+        fi
+
+        if ipset restore < "$restore_file"; then
+            log "INFO" "Rollback successful for ipset '$set_name'."
+            return 0
+        fi
+
+        log "ERROR" "Rollback failed for ipset '$set_name'."
+        return 1
+    fi
+
+    if ipset destroy "$set_name" 2>/dev/null || { ipset flush "$set_name" 2>/dev/null && ipset destroy "$set_name" 2>/dev/null; }; then
+        log "INFO" "Removed transient ipset '$set_name' during rollback."
+        return 0
+    fi
+
+    if ipset list "$set_name" >/dev/null 2>&1; then
+        log "ERROR" "Failed to remove transient ipset '$set_name' during rollback."
+        return 1
+    fi
+
+    return 0
+}
+
+cleanup_legacy_ipset() {
+    local set_name="$1"
+
+    command -v ipset >/dev/null 2>&1 || return 0
+    ipset list "$set_name" >/dev/null 2>&1 || return 0
+
+    if ipset destroy "$set_name" 2>/dev/null; then
+        log "INFO" "Removed legacy ipset '$set_name'."
+        return 0
+    fi
+
+    ipset flush "$set_name" 2>/dev/null || true
+    if ipset destroy "$set_name" 2>/dev/null; then
+        log "INFO" "Removed legacy ipset '$set_name' after flush."
+        return 0
+    fi
+
+    log "WARN" "Failed to remove legacy ipset '$set_name'."
+    return 1
+}
+
+rollback_iptables_runtime_state() {
+    local iptables_backup_file="$1"
+    local ip6tables_backup_file="$2"
+    local ipset_backup_v4="$3"
+    local ipset_backup_v6="$4"
+    local rollback_failed=0
+
+    restore_iptables_backup iptables-restore "$iptables_backup_file" "iptables" || rollback_failed=1
+
+    if [[ -s "$ip6tables_backup_file" ]]; then
+        restore_iptables_backup ip6tables-restore "$ip6tables_backup_file" "ip6tables" || rollback_failed=1
+    fi
+
+    restore_ipset_backup "$ALLOW_LIST_NAME_V4" "$ipset_backup_v4" || rollback_failed=1
+
+    if [[ -n "$ipset_backup_v6" && ( -s "$ipset_backup_v6" || "$GEOBLOCK_IPV6" == true ) ]]; then
+        restore_ipset_backup "$ALLOW_LIST_NAME_V6" "$ipset_backup_v6" || rollback_failed=1
+    fi
+
+    return "$rollback_failed"
+}
+
+# Replaces a directory with a fully prepared staging directory using O(1) renames.
+atomic_swap_directory() {
+    local new_dir="$1"
+    local target_dir="$2"
+    local backup_dir="$3"
+    local parent_dir="${target_dir%/*}"
+
+    [[ -d "$new_dir" ]] || die "Atomic swap source directory not found: $new_dir"
+    [[ "$parent_dir" == "$target_dir" ]] || mkdir -p "$parent_dir"
+
+    if [[ -d "$target_dir" ]]; then
+        mv "$target_dir" "$backup_dir" || die "Failed to move existing directory '$target_dir' to backup"
+    fi
+
+    if mv "$new_dir" "$target_dir"; then
+        rm -rf "$backup_dir"
+        return 0
+    fi
+
+    log "ERROR" "Failed to activate new directory '$target_dir'. Attempting rollback."
+    if [[ -d "$backup_dir" ]]; then
+        mv "$backup_dir" "$target_dir" || log "ERROR" "Rollback failed for '$target_dir'"
+    fi
+    die "Atomic directory swap failed for '$target_dir'"
+}
+
 # Helper to expand interface wildcards (e.g. "eth0 br-*")
 expand_interfaces() {
     local input_patterns="$1"
     local -a expanded_list=()
+    local -a unique_list=()
+    local match
+    local iface
+    local joined=""
+    declare -A seen_ifaces=()
 
     for pattern in $input_patterns; do
         if [[ "$pattern" == *"*"* ]]; then
@@ -514,7 +788,7 @@ expand_interfaces() {
             mapfile -t matches < <(compgen -G "/sys/class/net/$pattern" 2>/dev/null || true)
 
             for match in "${matches[@]}"; do
-                expanded_list+=("$(basename "$match")")
+                expanded_list+=("${match##*/}")
             done
         else
             # Literal interface
@@ -526,10 +800,18 @@ expand_interfaces() {
         fi
     done
 
-    # Deduplicate and join with commas
-    if [[ ${#expanded_list[@]} -gt 0 ]]; then
-        printf "%s\n" "${expanded_list[@]}" | sort -u | paste -s -d,
-    fi
+    # Deduplicate while preserving discovery order, then join with commas.
+    for iface in "${expanded_list[@]}"; do
+        [[ -n "${seen_ifaces[$iface]:-}" ]] && continue
+        seen_ifaces[$iface]=1
+        unique_list+=("$iface")
+    done
+
+    for iface in "${unique_list[@]}"; do
+        joined+="${joined:+,}$iface"
+    done
+
+    [[ -n "$joined" ]] && printf '%s\n' "$joined"
 }
 
 ###################
@@ -543,21 +825,24 @@ download_blocklists() {
     # Only 'log' is needed in '& ' subshells; retry_command/die are not called there.
     export -f log
 
+    # Limit background parsers to avoid a process burst on tiny machines.
+    # Limit background parsers to avoid a process burst on tiny machines.
     local max_jobs=8
     local urls=()
+    local -a expected_files=()
+    local -a missing_blocklist_files=()
+    local -A scheduled_files=()
+    local url cache_name
 
     # 1. Download and parse remote git index (v4 lists).
     # Non-fatal on network failure: fall back to the cached index from the previous
     # run (which lives at BLOCK_LIST_FILE_NAME on disk). Only return 1 if the index
     # is unreachable AND no cached copy exists.
     local -a index_resolve_opts=()
+    local index_resolve_opts_str=""
     if [[ -n "${DNS_SERVERS:-}" ]]; then
-        local url_host url_port
-        local -a ips=()
-        url_host=$(echo "$BLOCK_LIST_URL" | awk -F[/:] '{print $4}')
-        [[ "$BLOCK_LIST_URL" == https://* ]] && url_port=443 || url_port=80
-        read -ra ips <<< "$(_resolve_hostname "$url_host")"
-        for ip in "${ips[@]}"; do index_resolve_opts+=("--resolve" "$url_host:$url_port:$ip"); done
+        build_resolve_options_for_url "$BLOCK_LIST_URL" index_resolve_opts_str
+        [[ -n "$index_resolve_opts_str" ]] && read -ra index_resolve_opts <<< "$index_resolve_opts_str"
     fi
 
     if ! try_command curl -fsSL "${index_resolve_opts[@]}" --connect-timeout 10 --max-time 30 "$BLOCK_LIST_URL" -o "$BLOCK_LIST_FILE_NAME"; then
@@ -587,78 +872,102 @@ download_blocklists() {
         log "WARN" "Manual blocklist file not found: $MANUAL_BLOCK_LIST. Proceeding with repo lists only."
     fi
 
+    for url in "${urls[@]}"; do
+        cache_name=$(blocklist_cache_name_from_url "$url")
+        if [[ -n "${scheduled_files[$cache_name]:-}" ]]; then
+            continue
+        fi
+        scheduled_files[$cache_name]="$url"
+        expected_files+=("$cache_name")
+    done
+
+    if ((${#expected_files[@]} == 0)); then
+        log "WARN" "No blocklist sources configured after parsing."
+        shopt -s nullglob
+        local cached_existing=("$BLOCK_LIST_DIR"/*)
+        shopt -u nullglob
+        if ((${#cached_existing[@]} > 0)); then
+            log "WARN" "Using ${#cached_existing[@]} cached blocklist file(s) from previous run."
+            return 0
+        fi
+        return 1
+    fi
+
     # 3. Download ALL Lists into a staging directory (inside TEMP_DIR).
     # Atomic strategy: download to staging first, then replace BLOCK_LIST_DIR only
-    # if at least one file arrived. This preserves cached files from the previous
-    # run as a fallback if all downloads fail (e.g. all sources unreachable).
-    log "INFO" "Dispatching ${#urls[@]} downloads..."
+    # when every expected source is satisfied by either the fresh download or the
+    # cached copy of that exact same list.
+    log "INFO" "Dispatching ${#expected_files[@]} downloads..."
     local staging_dir="$TEMP_DIR/bl_staging"
     mkdir -p "$staging_dir"
 
     (
         cd "$staging_dir" || die "Failed to change directory to $staging_dir"
-        for url in "${urls[@]}"; do
+        for cache_name in "${expected_files[@]}"; do
             # Throttle: wait for a slot before spawning the next job
-            while (($(jobs -p | wc -l) >= max_jobs)); do
-                wait -n || true
-            done
+            wait_for_job_slot_limit "$max_jobs"
             (
                 local -a resolve_opts=()
+                local resolve_opts_str=""
+                local curl_err
+                local url="${scheduled_files[$cache_name]}"
                 if [[ -n "${DNS_SERVERS:-}" ]]; then
-                    local url_host url_port
-                    local -a ips=()
-                    url_host=$(echo "$url" | awk -F[/:] '{print $4}')
-                    [[ "$url" == https://* ]] && url_port=443 || url_port=80
-                    read -ra ips <<< "$(_resolve_hostname "$url_host")"
-                    for ip in "${ips[@]}"; do resolve_opts+=("--resolve" "$url_host:$url_port:$ip"); done
+                    build_resolve_options_for_url "$url" resolve_opts_str
+                    [[ -n "$resolve_opts_str" ]] && read -ra resolve_opts <<< "$resolve_opts_str"
                 fi
 
                 log "INFO" "Downloading: $url"
-                # Build a human-readable output filename from the last path component
-                # of the URL, with a short hash suffix to guarantee uniqueness across
-                # sources that happen to share the same filename.
-                # Query strings are stripped before extracting the basename.
-                # Example: https://example.com/lists/cn.txt → cn.txt_a3f2b1c4
-                local url_path url_name url_hash outfile curl_err
-                url_path="${url%%\?*}"
-                url_name="${url_path##*/}"
-                url_name="${url_name//[^a-zA-Z0-9._-]/_}"
-                url_hash=$(printf '%s' "$url" | md5sum | cut -c1-8)
-                outfile="${url_name:+${url_name}_}${url_hash}"
-                if ! curl_err=$(curl -fsSL "${resolve_opts[@]}" -o "$outfile" --connect-timeout 15 --max-time 90 "$url" 2>&1); then
+                if ! curl_err=$(curl -fsSL "${resolve_opts[@]}" -o "$cache_name" --connect-timeout 15 --max-time 90 "$url" 2>&1); then
                     log "WARN" "Failed to download $url: ${curl_err%%$'\n'*}"
+                elif file_has_markup_header "$cache_name"; then
+                    log "WARN" "Downloaded blocklist appears to contain HTML/XML and will be discarded: $url"
+                    rm -f -- "$cache_name"
                 fi
             ) &
         done
         wait || true
     )
 
-    # 4. Count results and swap staging → persistent dir (or fall back to cache).
-    shopt -s nullglob
-    local -a staged=("$staging_dir"/*)
-    shopt -u nullglob
-
+    # 4. Validate results and satisfy partial failures from the exact same cached list.
     local -i total ok failed
-    total=${#urls[@]}
-    ok=${#staged[@]}
-    failed=$(( total - ok ))
+    local staged_file cached_file
+    total=${#expected_files[@]}
+    ok=0
 
-    if ((ok > 0)); then
-        log "INFO" "Blocklist download summary: ${ok}/${total} succeeded, ${failed} failed."
-        rm -f "$BLOCK_LIST_DIR"/*
-        mv "${staged[@]}" "$BLOCK_LIST_DIR/"
-    else
-        log "WARN" "All ${total} blocklist downloads failed."
+    for cache_name in "${expected_files[@]}"; do
+        staged_file="$staging_dir/$cache_name"
+        if cached_blocklist_file_is_valid "$staged_file"; then
+            ((ok++))
+            continue
+        fi
+
+        rm -f -- "$staged_file"
+        cached_file="$BLOCK_LIST_DIR/$cache_name"
+        if cached_blocklist_file_is_valid "$cached_file"; then
+            cp -f -- "$cached_file" "$staged_file" || die "Failed to restore cached blocklist '$cache_name'"
+            log "WARN" "Using cached blocklist for unavailable source: $cache_name"
+            ((ok++))
+            continue
+        fi
+
+        missing_blocklist_files+=("$cache_name")
+    done
+
+    failed=$(( total - ok ))
+    if ((${#missing_blocklist_files[@]} > 0)); then
         shopt -s nullglob
         local cached=("$BLOCK_LIST_DIR"/*)
         shopt -u nullglob
         if ((${#cached[@]} > 0)); then
-            log "WARN" "Using ${#cached[@]} cached blocklist file(s) from previous run."
-        else
-            log "WARN" "No cached blocklist files available. Blocklist filtering will be skipped."
+            log "WARN" "Blocklist download incomplete (${ok}/${total} ready, ${failed} missing). Missing same-list cache for: ${missing_blocklist_files[*]}. Preserving previous raw blocklist directory."
+            return 0
         fi
+        log "WARN" "Blocklist download incomplete (${ok}/${total} ready, ${failed} missing) and no previous raw blocklist cache exists. Blocklist filtering will be skipped."
+        return 1
     fi
 
+    log "INFO" "Blocklist download summary: ${ok}/${total} ready, ${failed} missing."
+    atomic_swap_directory "$staging_dir" "$BLOCK_LIST_DIR" "$TEMP_DIR/block_raw.backup"
     log "INFO" "Blocklist download complete."
 }
 
@@ -677,20 +986,11 @@ separate_ip_families() {
         return
     fi
 
-    # Clear persistent clean blocklists before new separation to avoid stale data
-    rm -f "$BLOCK_LIST_DIR_V4"/* "$BLOCK_LIST_DIR_V6"/* 2>/dev/null || true
-    mkdir -p "$BLOCK_LIST_DIR_V4" "$BLOCK_LIST_DIR_V6"
-    
-    local v4_clean_dir="$BLOCK_LIST_DIR_V4"
-    local v6_clean_dir="$BLOCK_LIST_DIR_V6"
+    local v4_clean_dir="$TEMP_DIR/block_v4_clean"
+    local v6_clean_dir="$TEMP_DIR/block_v6_clean"
+    mkdir -p "$v4_clean_dir" "$v6_clean_dir"
 
-    # Regex patterns — anchored to start of line to avoid partial matches in text/HTML.
-    # IPv4: optional whitespace, then dotted-decimal with optional CIDR.
-    local ipv4_regex='^[[:space:]]*([0-9]{1,3}\.){3}[0-9]{1,3}(/[0-9]{1,2})?'
-    # IPv6: optional whitespace, then hex+colon with optional prefix length.
-    # This regex alone is too permissive (matches bare hex like "dead").
-    # A second-stage '| grep ":"' is REQUIRED to ensure at least one colon is present.
-    local ipv6_regex='^[[:space:]]*[0-9a-fA-F:]+(/[0-9]{1,3})?'
+    local max_jobs=8
 
     log "INFO" "Processing ${#raw_files[@]} files..."
 
@@ -699,26 +999,117 @@ separate_ip_families() {
         filename=$(basename "$file")
 
         # Sanity check: reject HTML/XML responses (captive portals, 404 pages).
-        # Checking the first 20 lines is sufficient for any valid DOCTYPE/html tag.
-        if head -n 20 "$file" | grep -qiE "<!DOCTYPE|<html|<head|<body"; then
+        # The helper scans the first significant non-empty lines, which is enough
+        # for real-world error pages while staying cheaper than a full parse.
+        if file_has_markup_header "$file"; then
             log "WARN" "File '$filename' appears to be HTML/XML (invalid content). Skipping."
             continue
         fi
 
-        # Extract IPv4 → clean_v4/filename.v4
-        # '|| true' is essential: grep exits 1 on no matches; without it 'wait'
-        # would propagate the non-zero status and abort the script via ERR trap.
-        grep -E "$ipv4_regex" "$file" | grep -v ":" > "$v4_clean_dir/$filename.v4" || true &
+        wait_for_job_slot_limit "$max_jobs"
+        (
+            local out_v4="$v4_clean_dir/$filename.v4"
+            local out_v6="$v6_clean_dir/$filename.v6"
+            local want_v6=0
+            [[ "$GEOBLOCK_IPV6" == true ]] && want_v6=1
 
-        # Extract IPv6 → clean_v6/filename.v6 (second-stage grep ensures colon present)
-        if [[ "$GEOBLOCK_IPV6" == true ]]; then
-            grep -E "$ipv6_regex" "$file" | grep ":" > "$v6_clean_dir/$filename.v6" || true &
-        fi
+            awk -v out_v4="$out_v4" -v out_v6="$out_v6" -v want_v6="$want_v6" '
+                function is_valid_cidr(prefix, maxbits) {
+                    return (prefix ~ /^[0-9]+$/ && prefix + 0 >= 0 && prefix + 0 <= maxbits)
+                }
+                function is_valid_ipv4(addr, parts, count, i, host) {
+                    host = addr
+                    if (addr ~ /\//) {
+                        count = split(addr, parts, "/")
+                        if (count != 2 || !is_valid_cidr(parts[2], 32)) return 0
+                        host = parts[1]
+                    }
+                    count = split(host, parts, ".")
+                    if (count != 4) return 0
+                    for (i = 1; i <= 4; i++) {
+                        if (parts[i] !~ /^[0-9]+$/ || parts[i] + 0 > 255) return 0
+                    }
+                    return 1
+                }
+                function is_valid_hex_group(group) {
+                    return (group ~ /^[0-9A-Fa-f]{1,4}$/)
+                }
+                function validate_ipv6_sequence(seq, groups, count, i, width) {
+                    if (seq == "") return 0
+                    count = split(seq, groups, ":")
+                    width = 0
+                    for (i = 1; i <= count; i++) {
+                        if (groups[i] ~ /\./) {
+                            if (i != count || groups[i] ~ /\// || !is_valid_ipv4(groups[i])) return -1
+                            width += 2
+                            continue
+                        }
+                        if (!is_valid_hex_group(groups[i])) return -1
+                        width++
+                    }
+                    return width
+                }
+                function is_valid_ipv6(addr, parts, host, tmp, halves, left_width, right_width, total_width) {
+                    host = addr
+                    if (addr ~ /\//) {
+                        if (split(addr, parts, "/") != 2 || !is_valid_cidr(parts[2], 128)) return 0
+                        host = parts[1]
+                    }
+                    if (host !~ /:/ || host ~ /:::/) return 0
+                    if (host == "::") return 1
+                    if (host ~ /^:[^:]/ || host ~ /[^:]:$/) return 0
+
+                    tmp = host
+                    if (gsub(/::/, "@", tmp) > 1) return 0
+
+                    if (index(host, "::")) {
+                        split(host, halves, /::/)
+                        left_width = validate_ipv6_sequence(halves[1])
+                        right_width = validate_ipv6_sequence(halves[2])
+                        if (left_width < 0 || right_width < 0) return 0
+                        total_width = left_width + right_width
+                        return (total_width < 8)
+                    }
+
+                    total_width = validate_ipv6_sequence(host)
+                    return (total_width == 8)
+                }
+                function ipv4_to_int(addr, octets) {
+                    split(addr, octets, ".")
+                    return (((octets[1] * 256 + octets[2]) * 256 + octets[3]) * 256 + octets[4])
+                }
+                function is_valid_ipv4_range(addr_range, parts, start_ip, end_ip) {
+                    if (split(addr_range, parts, /[[:space:]]+-[[:space:]]+/) != 2) return 0
+                    if (parts[1] ~ /\// || parts[2] ~ /\// || !is_valid_ipv4(parts[1]) || !is_valid_ipv4(parts[2])) return 0
+                    start_ip = ipv4_to_int(parts[1])
+                    end_ip = ipv4_to_int(parts[2])
+                    return (start_ip <= end_ip)
+                }
+                {
+                    sub(/\r$/, "", $0)
+                    sub(/[[:space:]]+#.*$/, "", $0)
+                    gsub(/^[[:space:]]+|[[:space:]]+$/, "", $0)
+                    if ($0 == "") next
+
+                    if (is_valid_ipv4($0) || is_valid_ipv4_range($0)) {
+                        print >> out_v4
+                        next
+                    }
+
+                    if (want_v6 && is_valid_ipv6($0)) {
+                        print >> out_v6
+                    }
+                }
+            ' "$file"
+        ) &
     done
     wait || true
 
-    BLOCK_LIST_CLEAN_V4_DIR="$v4_clean_dir"
-    BLOCK_LIST_CLEAN_V6_DIR="$v6_clean_dir"
+    atomic_swap_directory "$v4_clean_dir" "$BLOCK_LIST_DIR_V4" "$TEMP_DIR/block_v4.backup"
+    atomic_swap_directory "$v6_clean_dir" "$BLOCK_LIST_DIR_V6" "$TEMP_DIR/block_v6.backup"
+
+    BLOCK_LIST_CLEAN_V4_DIR="$BLOCK_LIST_DIR_V4"
+    BLOCK_LIST_CLEAN_V6_DIR="$BLOCK_LIST_DIR_V6"
     
     log "INFO" "Separation complete."
 }
@@ -728,12 +1119,11 @@ generate_ip_list() {
     log "INFO" "Generating optimized IP range lists..."
 
     # Enable nullglob so globs like *.v4 expand to empty arrays instead of a
-    # literal string when no files match. The RETURN trap restores the option
-    # on normal return. If this function calls 'die' (which calls 'exit'),
-    # RETURN does NOT fire — but since the script is exiting anyway, the leaked
-    # nullglob state is harmless.
+    # literal string when no files match. We restore the previous state before
+    # each normal return to avoid leaking shell options into later functions.
+    local nullglob_was_enabled=0
+    shopt -q nullglob && nullglob_was_enabled=1
     shopt -s nullglob
-    trap 'shopt -u nullglob' RETURN
 
     [[ -f "$COUNTRY_IPS_DOWNLOADER" && -x "$COUNTRY_IPS_DOWNLOADER" ]] || die "$COUNTRY_IPS_DOWNLOADER script not found/executable"
 
@@ -750,20 +1140,16 @@ generate_ip_list() {
         downloader_countries_arg="$GEO_IP_PROVIDER:$ALLOWED_COUNTRIES"
     fi
     # Try to download fresh country IP lists.
-    # On failure (transient DNS/network issue), fall back to cached lists from
-    # the previous successful run, which live persistently in $ALLOW_LIST_DIR.
-    # Only die if the download fails AND no cache exists at all.
+    # The downloader already performs exact per-list fallback from the previous
+    # successful cache. If it still fails, continuing with whatever happens to
+    # be present in lists/allow could apply a stale allowlist for the wrong
+    # country/provider request, so we fail safe here.
     if ! try_command "$COUNTRY_IPS_DOWNLOADER" -c "$downloader_countries_arg"; then
-        local cached_v4=("$ALLOW_LIST_DIR_V4"/*.v4)
-        if [[ ${#cached_v4[@]} -gt 0 && -s "${cached_v4[0]}" ]]; then
-            log "WARN" "Country IP download failed; using cached lists from previous run."
-        else
-            die "Country IP download failed and no cached lists found. Cannot apply firewall rules."
-        fi
+        die "Country IP download failed. Refusing to apply potentially stale allowlists."
     fi
 
     # --- Optimize IPv4 List ---
-    if [[ "$USE_BLOCKLIST" == true && -d "$BLOCK_LIST_CLEAN_V4_DIR" && "$(ls -A "$BLOCK_LIST_CLEAN_V4_DIR")" ]]; then
+    if [[ "$USE_BLOCKLIST" == true && -d "$BLOCK_LIST_CLEAN_V4_DIR" ]] && compgen -G "${BLOCK_LIST_CLEAN_V4_DIR%/}/*" >/dev/null; then
         log "INFO" "Optimizing IPv4 allow lists with native blocklist subtraction (@directory)..."
         "${iprange_cmd[@]}" @"$ALLOW_LIST_DIR_V4" --except @"$BLOCK_LIST_CLEAN_V4_DIR" >"$IP_RANGE_FILE_V4"
     else
@@ -779,11 +1165,12 @@ generate_ip_list() {
     if [[ "$GEOBLOCK_IPV6" != true ]]; then
         log "INFO" "IPv6 Geo-blocking is disabled (Default). Skipping v6 list generation."
         rm -f "$IP_RANGE_FILE_V6"
+        ((nullglob_was_enabled == 1)) || shopt -u nullglob
         return
     fi
     
     log "INFO" "Optimizing IPv6 allow lists..."
-    if [[ "$USE_BLOCKLIST" == true && -d "$BLOCK_LIST_CLEAN_V6_DIR" && "$(ls -A "$BLOCK_LIST_CLEAN_V6_DIR")" ]]; then
+    if [[ "$USE_BLOCKLIST" == true && -d "$BLOCK_LIST_CLEAN_V6_DIR" ]] && compgen -G "${BLOCK_LIST_CLEAN_V6_DIR%/}/*" >/dev/null; then
         log "INFO" "Optimizing IPv6 lists with native blocklist subtraction (@directory)..."
         "${iprange_cmd[@]}" -6 @"$ALLOW_LIST_DIR_V6" --except @"$BLOCK_LIST_CLEAN_V6_DIR" > "$IP_RANGE_FILE_V6"
     else
@@ -793,10 +1180,12 @@ generate_ip_list() {
 
     if [[ ! -s "$IP_RANGE_FILE_V6" ]]; then
         log "WARN" "IPv6 range file $IP_RANGE_FILE_V6 is empty. IPv6 Geo-IP will not be active."
+        ((nullglob_was_enabled == 1)) || shopt -u nullglob
         return
     fi
 
     log "INFO" "IPv6 range list created at $IP_RANGE_FILE_V6"
+    ((nullglob_was_enabled == 1)) || shopt -u nullglob
 }
 
 ###############################################################################
@@ -841,9 +1230,20 @@ populate_ipset() {
 apply_rules_iptables() {
     log "INFO" "Applying rules using iptables/ipset backend..."
 
-    # Clean up native nftables table (if it exists) to prevent conflict
-    log "INFO" "Cleaning up native nftables table (if any)..."
-    nft delete table inet $NFT_TABLE_NAME 2>/dev/null || true
+    local iptables_backup_file="$TEMP_DIR/iptables.backup"
+    local ip6tables_backup_file="$TEMP_DIR/ip6tables.backup"
+    local ipset_backup_v4="$TEMP_DIR/$ALLOW_LIST_NAME_V4.ipset.backup"
+    local ipset_backup_v6="$TEMP_DIR/$ALLOW_LIST_NAME_V6.ipset.backup"
+    iptables-save > "$iptables_backup_file" || die "Failed to back up current iptables rules"
+    if command -v ip6tables-save >/dev/null 2>&1; then
+        ip6tables-save > "$ip6tables_backup_file" || die "Failed to back up current ip6tables rules"
+    fi
+    backup_ipset_state "$ALLOW_LIST_NAME_V4" "$ipset_backup_v4"
+    if [[ "$GEOBLOCK_IPV6" == true ]]; then
+        backup_ipset_state "$ALLOW_LIST_NAME_V6" "$ipset_backup_v6"
+    else
+        : > "$ipset_backup_v6"
+    fi
 
     # 1. Populate IPv4 ipset
     populate_ipset "$ALLOW_LIST_NAME_V4" "$IP_RANGE_FILE_V4" "inet"
@@ -963,19 +1363,39 @@ COMMIT
 EOF
 
     # Apply Rules
-    iptables-restore --noflush < "$iptables_rules_file" || die "Failed to apply iptables rules"
+    if ! iptables-restore --noflush < "$iptables_rules_file"; then
+        log "ERROR" "Failed to apply iptables rules. Restoring previous ruleset..."
+        rollback_iptables_runtime_state "$iptables_backup_file" "$ip6tables_backup_file" "$ipset_backup_v4" "$ipset_backup_v6" || true
+        die "Failed to apply iptables rules"
+    fi
 
     # Hook into system chains
-    iptables -t mangle -I PREROUTING 1 -j LABO_PREROUTING
-    iptables -I INPUT 1 -j LABO_INPUT
+    if ! iptables -t mangle -I PREROUTING 1 -j LABO_PREROUTING; then
+        log "ERROR" "Failed to install PREROUTING hook. Restoring previous iptables ruleset..."
+        rollback_iptables_runtime_state "$iptables_backup_file" "$ip6tables_backup_file" "$ipset_backup_v4" "$ipset_backup_v6" || true
+        die "Failed to install PREROUTING hook"
+    fi
+    if ! iptables -I INPUT 1 -j LABO_INPUT; then
+        log "ERROR" "Failed to install INPUT hook. Restoring previous iptables ruleset..."
+        rollback_iptables_runtime_state "$iptables_backup_file" "$ip6tables_backup_file" "$ipset_backup_v4" "$ipset_backup_v6" || true
+        die "Failed to install INPUT hook"
+    fi
     # DOCKER-USER is created by the Docker daemon on startup; it does not exist
     # on systems without Docker or when the daemon is stopped.
     if iptables -L DOCKER-USER >/dev/null 2>&1; then
-        iptables -I DOCKER-USER 1 -j LABO_DOCKER_USER
+        if ! iptables -I DOCKER-USER 1 -j LABO_DOCKER_USER; then
+            log "ERROR" "Failed to install DOCKER-USER hook. Restoring previous iptables ruleset..."
+            rollback_iptables_runtime_state "$iptables_backup_file" "$ip6tables_backup_file" "$ipset_backup_v4" "$ipset_backup_v6" || true
+            die "Failed to install DOCKER-USER hook"
+        fi
     else
         log "WARN" "iptables DOCKER-USER chain not found (Docker not running?). Container FORWARD protection inactive."
     fi
-    iptables -t nat -I POSTROUTING 1 -j LABO_POSTROUTING
+    if ! iptables -t nat -I POSTROUTING 1 -j LABO_POSTROUTING; then
+        log "ERROR" "Failed to install POSTROUTING hook. Restoring previous iptables ruleset..."
+        rollback_iptables_runtime_state "$iptables_backup_file" "$ip6tables_backup_file" "$ipset_backup_v4" "$ipset_backup_v6" || true
+        die "Failed to install POSTROUTING hook"
+    fi
 
     log "INFO" "iptables (IPv4) rules applied successfully."
 
@@ -1049,12 +1469,28 @@ COMMIT
 -A LABO_DOCKER_USER_V6 -j RETURN
 COMMIT
 EOF
-            ip6tables-restore --noflush < "$ip6tables_rules_file" || die "Failed to apply ip6tables rules"
+            if ! ip6tables-restore --noflush < "$ip6tables_rules_file"; then
+                log "ERROR" "Failed to apply ip6tables rules. Restoring previous IPv6 ruleset..."
+                rollback_iptables_runtime_state "$iptables_backup_file" "$ip6tables_backup_file" "$ipset_backup_v4" "$ipset_backup_v6" || true
+                die "Failed to apply ip6tables rules"
+            fi
 
-            ip6tables -t mangle -I PREROUTING 1 -j LABO_PREROUTING_V6
-            ip6tables -I INPUT 1 -j LABO_INPUT_V6
+            if ! ip6tables -t mangle -I PREROUTING 1 -j LABO_PREROUTING_V6; then
+                log "ERROR" "Failed to install IPv6 PREROUTING hook. Restoring previous IPv6 ruleset..."
+                rollback_iptables_runtime_state "$iptables_backup_file" "$ip6tables_backup_file" "$ipset_backup_v4" "$ipset_backup_v6" || true
+                die "Failed to install IPv6 PREROUTING hook"
+            fi
+            if ! ip6tables -I INPUT 1 -j LABO_INPUT_V6; then
+                log "ERROR" "Failed to install IPv6 INPUT hook. Restoring previous IPv6 ruleset..."
+                rollback_iptables_runtime_state "$iptables_backup_file" "$ip6tables_backup_file" "$ipset_backup_v4" "$ipset_backup_v6" || true
+                die "Failed to install IPv6 INPUT hook"
+            fi
             if ip6tables -L DOCKER-USER >/dev/null 2>&1; then
-                ip6tables -I DOCKER-USER 1 -j LABO_DOCKER_USER_V6
+                if ! ip6tables -I DOCKER-USER 1 -j LABO_DOCKER_USER_V6; then
+                    log "ERROR" "Failed to install IPv6 DOCKER-USER hook. Restoring previous IPv6 ruleset..."
+                    rollback_iptables_runtime_state "$iptables_backup_file" "$ip6tables_backup_file" "$ipset_backup_v4" "$ipset_backup_v6" || true
+                    die "Failed to install IPv6 DOCKER-USER hook"
+                fi
             else
                 log "WARN" "ip6tables DOCKER-USER chain not found (Docker not running?). IPv6 container FORWARD protection inactive."
             fi
@@ -1062,6 +1498,10 @@ EOF
             log "INFO" "ip6tables (IPv6) rules applied successfully."
         else
             log "WARN" "IPv6 range file is empty. Skipping IPv6 rule application."
+            cleanup_iptables_chain ip6tables mangle  PREROUTING  LABO_PREROUTING_V6
+            cleanup_iptables_chain ip6tables filter  INPUT       LABO_INPUT_V6
+            cleanup_iptables_chain ip6tables filter  DOCKER-USER LABO_DOCKER_USER_V6
+            cleanup_legacy_ipset "$ALLOW_LIST_NAME_V6" || true
         fi
     else
         # Flush if IPv6 GeoBlocking is disabled but backend is iptables
@@ -1071,7 +1511,11 @@ EOF
              cleanup_iptables_chain ip6tables filter  INPUT       LABO_INPUT_V6
              cleanup_iptables_chain ip6tables filter  DOCKER-USER LABO_DOCKER_USER_V6
         fi
+        cleanup_legacy_ipset "$ALLOW_LIST_NAME_V6" || true
     fi
+
+    # Clean up native nftables table only after the legacy backend is fully active.
+    nft delete table inet "$NFT_TABLE_NAME" 2>/dev/null || true
 }
 
 ###############################################################################
@@ -1083,21 +1527,6 @@ EOF
 # Apply all firewall rules using the modern nftables backend
 apply_rules_nftables() {
     log "INFO" "Applying rules using nftables (native) backend..."
-
-    # --- Clean up legacy iptables rules ---
-    # This prevents conflicts if switching from iptables to nftables.
-    if command -v iptables &>/dev/null; then
-        log "INFO" "Cleaning up legacy iptables rules..."
-        cleanup_iptables_chain iptables mangle  PREROUTING  LABO_PREROUTING
-        cleanup_iptables_chain iptables filter  INPUT       LABO_INPUT
-        cleanup_iptables_chain iptables filter  DOCKER-USER LABO_DOCKER_USER
-    fi
-    if command -v ip6tables &>/dev/null; then
-        log "INFO" "Cleaning up legacy ip6tables rules..."
-        cleanup_iptables_chain ip6tables mangle  PREROUTING  LABO_PREROUTING_V6
-        cleanup_iptables_chain ip6tables filter  INPUT       LABO_INPUT_V6
-        cleanup_iptables_chain ip6tables filter  DOCKER-USER LABO_DOCKER_USER_V6
-    fi
 
     # --- Prepare sets (Stream-based approach) ---
     # We write the comma-separated elements to temp files instead of variables
@@ -1127,21 +1556,15 @@ apply_rules_nftables() {
         fi
     fi
 
-    # --- Backup, Generate, and Apply Ruleset ---
-    # Save the current table before modifying kernel state so it can be restored
-    # if application fails. nft list table is used (not list ruleset) to avoid
-    # capturing third-party tables (e.g. Docker) in the backup.
-    local nft_backup_file="$TEMP_DIR/nft_backup.nft"
-    if nft list table inet "$NFT_TABLE_NAME" > "$nft_backup_file" 2>/dev/null && [[ -s "$nft_backup_file" ]]; then
-        log "INFO" "Existing $NFT_TABLE_NAME table backed up to $nft_backup_file (rollback available on failure)."
-    else
-        nft_backup_file=""
-        log "INFO" "No existing $NFT_TABLE_NAME table found; rollback unavailable for this run."
+    # --- Generate and Apply Ruleset ---
+    local nft_table_exists=false
+    if nft list table inet "$NFT_TABLE_NAME" >/dev/null 2>&1; then
+        nft_table_exists=true
     fi
 
     # Write the complete ruleset to a temp file before touching kernel state.
-    # Building to a file (vs. directly piping to nft) ensures that a failure in
-    # the subshell cannot leave the firewall in a half-applied state.
+    # We emit the optional delete together with the new table definition so the
+    # kernel sees one atomic nft batch instead of a delete/apply window.
     local nft_config_file="$TEMP_DIR/nft_ruleset.nft"
     log "INFO" "Generating nftables ruleset..."
     (
@@ -1149,6 +1572,10 @@ apply_rules_nftables() {
         local priv_v4_elems priv_v6_elems
         priv_v4_elems=$(printf "%s, " "${PRIVATE_NETS_V4[@]}"); priv_v4_elems="${priv_v4_elems%, }"
         priv_v6_elems=$(printf "%s, " "${PRIVATE_NETS_V6[@]}"); priv_v6_elems="${priv_v6_elems%, }"
+
+        if [[ "$nft_table_exists" == true ]]; then
+            echo "delete table inet $NFT_TABLE_NAME"
+        fi
 
         cat <<EOF
         table inet $NFT_TABLE_NAME {
@@ -1329,23 +1756,31 @@ EOF
 
     [[ -s "$nft_config_file" ]] || die "Generated nftables config is empty. Aborting to preserve existing rules."
 
-    # Remove the existing table, then atomically load the new config.
-    # If nft rejects the new config, restore the backup to prevent leaving the
-    # firewall in an unprotected state.
-    log "INFO" "Replacing $NFT_TABLE_NAME table..."
-    nft delete table inet "$NFT_TABLE_NAME" 2>/dev/null || true
-    if ! nft -f "$nft_config_file"; then
-        log "ERROR" "Failed to apply nftables config."
-        if [[ -n "$nft_backup_file" ]]; then
-            log "WARN" "Restoring previous $NFT_TABLE_NAME table from backup..."
-            nft -f "$nft_backup_file" \
-                && log "INFO" "Rollback successful. Previous ruleset restored." \
-                || log "ERROR" "Rollback FAILED. Firewall has no active rules. Immediate manual intervention required."
-        else
-            log "ERROR" "No backup available for rollback. Firewall has no active rules."
-        fi
-        die "nftables ruleset application failed."
+    if ! nft -c -f "$nft_config_file"; then
+        die "Generated nftables config failed validation. Existing rules were left untouched."
     fi
+
+    log "INFO" "Replacing $NFT_TABLE_NAME table atomically..."
+    if ! nft -f "$nft_config_file"; then
+        die "nftables ruleset application failed. Existing rules were left untouched."
+    fi
+
+    # Remove legacy iptables rules only after nftables is active.
+    if command -v iptables &>/dev/null; then
+        log "INFO" "Cleaning up legacy iptables rules..."
+        cleanup_iptables_chain iptables mangle  PREROUTING  LABO_PREROUTING
+        cleanup_iptables_chain iptables filter  INPUT       LABO_INPUT
+        cleanup_iptables_chain iptables filter  DOCKER-USER LABO_DOCKER_USER
+        cleanup_iptables_chain iptables nat     POSTROUTING LABO_POSTROUTING
+    fi
+    if command -v ip6tables &>/dev/null; then
+        log "INFO" "Cleaning up legacy ip6tables rules..."
+        cleanup_iptables_chain ip6tables mangle  PREROUTING  LABO_PREROUTING_V6
+        cleanup_iptables_chain ip6tables filter  INPUT       LABO_INPUT_V6
+        cleanup_iptables_chain ip6tables filter  DOCKER-USER LABO_DOCKER_USER_V6
+    fi
+    cleanup_legacy_ipset "$ALLOW_LIST_NAME_V4" || true
+    cleanup_legacy_ipset "$ALLOW_LIST_NAME_V6" || true
 
     log "INFO" "nftables ruleset applied successfully."
 }
