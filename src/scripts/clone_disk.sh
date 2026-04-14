@@ -1,13 +1,14 @@
 #!/usr/bin/env bash
 
 ###############################################################################
-# Universal System Clone Script (RPi & x86) v2.3
+# Guided System Clone Script (RPi & x86) v2.4
 #
-# Creates a bootable 1:1 clone of the running Linux system to an external drive.
-# Automatically adapts to the source architecture (MBR/Legacy or GPT/UEFI).
+# Creates a bootable file-level clone of the running Linux system to an external
+# drive for supported layouts.
 #
 # Key Features:
-# - Auto-Detection: Identifies source disk and partition table type automatically.
+# - Auto-Detection: Identifies source disk, boot mount, and partition table type.
+# - Fail-Fast Safety: Aborts on unsupported layouts instead of guessing.
 # - Boot Safety: Generates fresh UUIDs and patches /etc/fstab, cmdline, and loaders.
 # - Optimization: SSD-friendly formatting and smart rsync exclusions (caches, tmp).
 # - Robustness: Strict error handling, safe cleanup traps, and LVM/LUKS guards.
@@ -15,7 +16,8 @@
 # Usage: sudo ./clone_disk.sh
 #
 # Requirements: rsync, parted, mkfs.*, blkid, lsblk, findmnt
-# Author: LaboDJ | Last Updated: 2026/03/25
+# Supported: ext4 root + single vfat boot mount + RPi firmware or systemd-boot
+# Author: LaboDJ | Last Updated: 2026/04/14
 ###############################################################################
 
 # Enable strict mode:
@@ -46,10 +48,18 @@ declare -r -a EXT4_OPTIONS=(
 declare -r INODE_RATIO="16384"
 
 # Required commands for dependency checks
-declare -ra REQUIRED_COMMANDS=(rsync parted mkfs.vfat mkfs.ext4 blkid lsblk grep awk sed dd stat truncate udevadm partprobe findmnt mountpoint fstrim wipefs)
+declare -ra REQUIRED_COMMANDS=(rsync parted mkfs.vfat mkfs.ext4 blkid lsblk grep awk sed dd stat truncate udevadm partprobe findmnt mountpoint fstrim wipefs numfmt fsck fsck.fat mkswap)
 
 # Known boot mount points to validate against fstab (order = priority)
 declare -ra BOOT_MOUNT_CANDIDATES=(/boot/firmware /boot/efi /efi /boot)
+
+# Supported topology:
+# - Plain partition root on ext4
+# - Exactly one dedicated boot mount among BOOT_MOUNT_CANDIDATES
+# - Boot filesystem on vfat
+# - Bootloader: Raspberry Pi firmware (cmdline.txt) or systemd-boot
+declare -r BOOT_PARTITION_SIZE_MIB=1024
+declare -r BOOT_PARTITION_HEADROOM_MIB=64
 
 # Excludes for rsync
 # These paths are excluded to keep the backup clean and avoid copying runtime states.
@@ -66,20 +76,24 @@ declare -ra EXCLUDES=(
     "/var/lib/docker/*" "/var/lib/containerd/*" # Exclude container state (prevents rsync errors on live systems)
 )
 
-# Colors
-declare -r GREEN='\033[0;32m'
-declare -r YELLOW='\033[1;33m'
-declare -r RED='\033[0;31m'
-declare -r NC='\033[0m' # No Color
+# Colors (enabled only on TTY unless NO_COLOR is set)
+declare GREEN=""
+declare YELLOW=""
+declare RED=""
+declare NC=""
 
 # Global Variables
 declare DST_MOUNT_ROOT=""
 declare SRC_DEVICE=""
 declare DST_DEVICE=""
 declare SRC_TABLE_TYPE=""
+declare SRC_ROOT_FS_TYPE=""
+declare SRC_BOOT_FS_TYPE=""
+declare SOURCE_BOOTLOADER=""
 declare DST_PART1=""
 declare DST_PART2=""
 declare BOOT_MOUNT=""
+declare -a AVAILABLE_DISKS=()
 declare -a MOUNTED_BY_SCRIPT=()
 
 ###################
@@ -97,6 +111,21 @@ log() {
         ERROR) color=$RED ;;
     esac
     printf '%(%Y-%m-%d %H:%M:%S)T %b[%s]%b %s\n' -1 "$color" "$level" "$NC" "$*" >&2
+}
+
+# Initialize log colors only when stderr is interactive
+setup_colors() {
+    if [[ -t 2 ]] && [[ -z "${NO_COLOR:-}" ]]; then
+        GREEN='\033[0;32m'
+        YELLOW='\033[1;33m'
+        RED='\033[0;31m'
+        NC='\033[0m'
+    else
+        GREEN=""
+        YELLOW=""
+        RED=""
+        NC=""
+    fi
 }
 
 # Log an error message and terminate the script immediately.
@@ -126,6 +155,11 @@ check_dependencies() {
 detect_partition_table() {
     local disk=$1
     local label
+    label=$(lsblk -dn -o PTTYPE "$disk" 2>/dev/null | awk 'NF { print $1; exit }' || true)
+    case "$label" in
+        gpt) echo "gpt"; return 0 ;;
+        dos|msdos) echo "mbr"; return 0 ;;
+    esac
     # Use parted to query the label type safely
     # We use || true to prevent pipefail from exiting if grep finds nothing
     # LC_ALL=C forces English output so grep "Partition Table" works on all locales
@@ -165,6 +199,58 @@ get_partuuid() {
     blkid -s PARTUUID -o value "$1"
 }
 
+# Get parent disk device for a partition/device
+# Args: $1 - partition path
+# Returns: parent disk path (e.g. /dev/sda)
+get_parent_disk() {
+    local device=$1
+    local parent
+    parent=$(lsblk -no PKNAME "$device" 2>/dev/null | awk 'NF { print $1; exit }' || true)
+    [[ -n "$parent" ]] || return 1
+    printf '/dev/%s\n' "$parent"
+}
+
+# Check whether a string exists in an array
+# Args: $1 - needle, $@ - haystack
+contains_value() {
+    local needle=$1
+    shift
+    local value
+    for value in "$@"; do
+        [[ "$value" == "$needle" ]] && return 0
+    done
+    return 1
+}
+
+# Discover disks that can be selected as destinations
+discover_available_disks() {
+    mapfile -t AVAILABLE_DISKS < <(lsblk -dn -p -o NAME,TYPE | awk '$2 == "disk" { print $1 }')
+    [[ ${#AVAILABLE_DISKS[@]} -gt 0 ]] || die "No block disks were detected by lsblk."
+    [[ ${#AVAILABLE_DISKS[@]} -ge 2 ]] || die "At least two whole-disk devices are required (source + destination)."
+}
+
+# Print a compact human-readable disk description
+# Args: $1 - disk path
+describe_disk() {
+    local disk=$1
+    local size model serial transport removable
+
+    size=$(lsblk -dn -o SIZE "$disk" 2>/dev/null | awk '{$1=$1; print}')
+    model=$(lsblk -dn -o MODEL "$disk" 2>/dev/null | sed -E 's/^[[:space:]]+|[[:space:]]+$//g')
+    serial=$(lsblk -dn -o SERIAL "$disk" 2>/dev/null | sed -E 's/^[[:space:]]+|[[:space:]]+$//g')
+    transport=$(lsblk -dn -o TRAN "$disk" 2>/dev/null | awk '{$1=$1; print}')
+    removable=$(lsblk -dn -o RM "$disk" 2>/dev/null | awk '{$1=$1; print}')
+
+    [[ -n "$size" ]] || size="-"
+    [[ -n "$model" ]] || model="-"
+    [[ -n "$serial" ]] || serial="-"
+    [[ -n "$transport" ]] || transport="-"
+    [[ -n "$removable" ]] || removable="-"
+
+    printf 'size=%s | model=%s | serial=%s | tran=%s | rm=%s' \
+        "$size" "$model" "$serial" "$transport" "$removable"
+}
+
 # Generic error handler, triggered by 'trap ... ERR'.
 # @param $1 The line number where the error occurred (passed as $LINENO from the trap).
 handle_error() {
@@ -179,18 +265,128 @@ handle_error() {
     exit "$exit_code"
 }
 
-# Detect the active boot mount point on the running system.
-# Checks known candidates in priority order; falls back to /boot.
-# Returns: The boot mount path (e.g., /boot/firmware, /boot/efi, /boot)
-detect_boot_mount() {
-    for candidate in "${BOOT_MOUNT_CANDIDATES[@]}"; do
-        if mountpoint -q "$candidate"; then
-            echo "$candidate"
-            return
-        fi
-    done
-    # Fallback to /boot (standard for Arch XBOOTLDR or straight ESP)
-    echo "/boot"
+# Read boot-like mount points defined in /etc/fstab
+# Returns one path per line
+get_fstab_boot_mounts() {
+    awk '
+        $0 !~ /^[[:space:]]*#/ && NF >= 2 {
+            mount_point = $2
+            if (length(mount_point) > 1) sub(/\/$/, "", mount_point)
+            if (mount_point == "/boot/firmware" || mount_point == "/boot/efi" || mount_point == "/efi" || mount_point == "/boot") {
+                print mount_point
+            }
+        }
+    ' /etc/fstab
+}
+
+# Detect the single supported boot mount from fstab and validate that it is mounted.
+detect_supported_boot_mount() {
+    local -a boot_mounts=()
+    mapfile -t boot_mounts < <(get_fstab_boot_mounts)
+
+    if [[ ${#boot_mounts[@]} -eq 0 ]]; then
+        die "Unsupported layout: no dedicated boot mount found in /etc/fstab. This script requires exactly one of: ${BOOT_MOUNT_CANDIDATES[*]}"
+    fi
+
+    if [[ ${#boot_mounts[@]} -gt 1 ]]; then
+        die "Unsupported layout: multiple boot mount points detected in /etc/fstab (${boot_mounts[*]}). This script supports exactly one dedicated boot mount."
+    fi
+
+    BOOT_MOUNT="${boot_mounts[0]}"
+    mountpoint -q "$BOOT_MOUNT" || die "Boot mount $BOOT_MOUNT is defined in /etc/fstab but is not currently mounted."
+}
+
+# Detect the supported source topology and fail fast on unsupported systems.
+validate_supported_source_layout() {
+    local root_part root_disk boot_source
+
+    root_part=$(findmnt -n -o SOURCE /)
+    SRC_ROOT_FS_TYPE=$(findmnt -n -o FSTYPE /)
+
+    if [[ "$root_part" == /dev/mapper/* ]]; then
+        die "Unsupported layout: detected device-mapper root ($root_part). LVM/LUKS cloning is out of scope for this script."
+    fi
+
+    root_disk=$(get_parent_disk "$root_part") || die "Could not resolve the parent disk for root source $root_part."
+    SRC_DEVICE="$root_disk"
+
+    [[ -b "$SRC_DEVICE" ]] || die "Detected source device $SRC_DEVICE is not a valid block disk."
+    [[ "$SRC_ROOT_FS_TYPE" == "ext4" ]] || die "Unsupported root filesystem: $SRC_ROOT_FS_TYPE. This script currently supports ext4 root only."
+
+    SRC_TABLE_TYPE=$(detect_partition_table "$SRC_DEVICE")
+    [[ "$SRC_TABLE_TYPE" != "unknown" ]] || die "Could not detect the partition table type for source disk $SRC_DEVICE."
+
+    detect_supported_boot_mount
+    SRC_BOOT_FS_TYPE=$(findmnt -n -o FSTYPE "$BOOT_MOUNT")
+    [[ "$SRC_BOOT_FS_TYPE" == "vfat" ]] || die "Unsupported boot filesystem on $BOOT_MOUNT: $SRC_BOOT_FS_TYPE. This script currently supports vfat boot partitions only."
+
+    boot_source=$(findmnt -n -o SOURCE "$BOOT_MOUNT")
+    if [[ "$boot_source" == /dev/mapper/* ]]; then
+        die "Unsupported layout: detected device-mapper boot partition ($boot_source)."
+    fi
+
+    if [[ -f "$BOOT_MOUNT/cmdline.txt" ]]; then
+        SOURCE_BOOTLOADER="rpi-firmware"
+    elif [[ -d "$BOOT_MOUNT/loader/entries" ]] || [[ -d "/boot/loader/entries" ]]; then
+        SOURCE_BOOTLOADER="systemd-boot"
+    elif [[ -f "/boot/grub/grub.cfg" ]] || [[ -f "/boot/grub2/grub.cfg" ]] || [[ -f "$BOOT_MOUNT/grub/grub.cfg" ]] || [[ -f "$BOOT_MOUNT/grub2/grub.cfg" ]]; then
+        SOURCE_BOOTLOADER="grub"
+    else
+        SOURCE_BOOTLOADER="unknown"
+    fi
+
+    case "$SOURCE_BOOTLOADER" in
+        rpi-firmware|systemd-boot) ;;
+        grub)
+            die "Unsupported bootloader: GRUB detected. This script does not regenerate GRUB config safely after UUID changes."
+            ;;
+        *)
+            die "Unsupported bootloader layout under $BOOT_MOUNT. Supported bootloaders: Raspberry Pi firmware or systemd-boot."
+            ;;
+    esac
+}
+
+# Ensure the destination disk is not mounted anywhere before formatting or fsck.
+# Args: $1 - disk path
+ensure_disk_unmounted() {
+    local disk=$1
+    local mount_path
+
+    while read -r mount_path; do
+        [[ -n "$mount_path" ]] || continue
+        log "WARN" "Unmounting existing destination mount: $mount_path"
+        umount "$mount_path" || die "Failed to unmount destination path $mount_path"
+    done < <(lsblk -nr -o MOUNTPOINT "$disk" | awk 'NF')
+}
+
+# Ensure the destination disk selection points to a real whole disk.
+# Args: $1 - disk path
+validate_destination_disk() {
+    local disk=$1
+    if [[ ! -b "$disk" ]]; then
+        log "WARN" "Destination $disk is not a block device."
+        return 1
+    fi
+
+    if [[ "$(lsblk -dn -o TYPE "$disk" 2>/dev/null | awk 'NF { print $1; exit }')" != "disk" ]]; then
+        log "WARN" "Destination $disk is not a whole disk device."
+        return 1
+    fi
+
+    return 0
+}
+
+# Check that destination partitions are suitable for incremental sync
+validate_incremental_target_layout() {
+    local part1_fs part2_fs
+
+    [[ -b "$DST_PART1" && -b "$DST_PART2" ]] || die "Incremental update requires existing destination partitions $DST_PART1 and $DST_PART2."
+
+    part1_fs=$(blkid -s TYPE -o value "$DST_PART1" 2>/dev/null || true)
+    part2_fs=$(blkid -s TYPE -o value "$DST_PART2" 2>/dev/null || true)
+
+    [[ "$part1_fs" == "vfat" ]] || die "Incremental update requires $DST_PART1 to be vfat, found: ${part1_fs:-unknown}."
+    [[ "$part2_fs" == "ext4" ]] || die "Incremental update requires $DST_PART2 to be ext4, found: ${part2_fs:-unknown}."
 }
 
 # Patch systemd-boot loader entries in a directory.
@@ -232,6 +428,7 @@ _verify_loader_entries() {
     [[ -d "$entries_dir" ]] || return 1
 
     local found=false
+    local failures=0
     shopt -s nullglob
     trap 'shopt -u nullglob' RETURN
     for entry in "$entries_dir"/*.conf; do
@@ -240,9 +437,11 @@ _verify_loader_entries() {
             log "INFO" "[PASS] systemd-boot entry${label} $(basename "$entry") updated"
         else
             log "ERROR" "[FAIL] systemd-boot entry${label} $(basename "$entry") NOT updated!"
+            ((failures++))
         fi
     done
-    [[ "$found" == true ]]
+    [[ "$found" == true ]] || return 1
+    ((failures == 0))
 }
 
 # Check if destination has enough space for the backup
@@ -263,8 +462,11 @@ check_space() {
     # Assuming active system where /boot/firmware or /boot is mounted.
     local src_boot_used
     src_boot_used=$(df -B1 --output=used "$src_boot" | tail -n 1)
-    
-    local total_src_used=$((src_root_used + src_boot_used))
+
+    local total_src_used=$src_root_used
+    if [[ "$(findmnt -n -o SOURCE "$src_root")" != "$(findmnt -n -o SOURCE "$src_boot")" ]]; then
+        total_src_used=$((src_root_used + src_boot_used))
+    fi
     
     # Get destination size in bytes
     local dst_size
@@ -275,6 +477,12 @@ check_space() {
     local base_margin=$((2 * 1024 * 1024 * 1024))
     local percent_margin=$((total_src_used * 5 / 100))
     local required_size=$((total_src_used + base_margin + percent_margin))
+    local boot_partition_bytes=$((BOOT_PARTITION_SIZE_MIB * 1024 * 1024))
+    local boot_headroom_bytes=$((BOOT_PARTITION_HEADROOM_MIB * 1024 * 1024))
+
+    if (( src_boot_used + boot_headroom_bytes > boot_partition_bytes )); then
+        die "Boot data on $src_boot uses $(numfmt --to=iec-i --suffix=B "$src_boot_used"), which is too large for the fixed ${BOOT_PARTITION_SIZE_MIB}MiB destination boot partition."
+    fi
     
     if [[ "$dst_size" -lt "$required_size" ]]; then
         log "ERROR" "Destination disk is too small."
@@ -353,79 +561,55 @@ setup_signal_handlers() {
 # Interactive disk selection menu
 select_disks() {
     echo "=== Disk Selection ==="
-    echo "Available disks:"
-    # Filter on the NAME column only (awk $1) to avoid false matches on model names
-    # (e.g. a disk named "SanDisk" would incorrectly match "sd" against the full line).
-    lsblk -d -n -o NAME,SIZE,MODEL,TRAN | awk '$1 ~ /^(sd|nvme|mmcblk)/' || true
 
-    # Auto-detect Source Disk (The one hosting /)
-    # We MUST clone the disk we are running from, because rsync copies from /
-    log "INFO" "Auto-detecting source disk..."
-    local root_part
-    root_part=$(findmnt -n -o SOURCE /)
-    
-    # Handle potential mapper/root devices if simple resolution fails
-    # Get the parent disk device (pkname gives the parent kernel name)
-    local src_name
-    src_name=$(lsblk -no pkname "$root_part" | head -n 1)
-    
-    SRC_DEVICE="/dev/$src_name"
-    
-    # Check for LVM/LUKS (Device Mapper)
-    # Cloning LVM/LUKS requires complex volume recreation which is out of scope for this script.
-    if [[ "$root_part" == *"/dev/mapper/"* ]] || [[ "$src_name" == dm-* ]]; then
-        log "ERROR" "Detected LVM or LUKS encrypted root partition ($root_part)."
-        log "ERROR" "This script does not currently support cloning LVM/LUKS systems."
-        exit 1
-    fi
+    log "INFO" "Detecting source topology..."
+    validate_supported_source_layout
+    discover_available_disks
 
-    if [[ ! -b "$SRC_DEVICE" ]]; then
-        log "ERROR" "Could not detect valid source device for root partition $root_part"
-        exit 1
-    fi
-    
-    log "INFO" "Detected Source: $SRC_DEVICE (hosts /)"
+    log "INFO" "Detected Source: $SRC_DEVICE"
+    log "INFO" "Source Root FS: $SRC_ROOT_FS_TYPE | Boot Mount: $BOOT_MOUNT ($SRC_BOOT_FS_TYPE) | Bootloader: $SOURCE_BOOTLOADER | Partition Table: $SRC_TABLE_TYPE"
+    log "INFO" "Available disks:"
 
-    # Safety Check: Verify Boot Mounts
-    # If fstab defines a boot partition, it MUST be mounted, otherwise rsync will copy to the wrong place
-    log "INFO" "Verifying boot mount points..."
-    for bm in "${BOOT_MOUNT_CANDIDATES[@]}"; do
-        if grep -v "^[[:space:]]*#" /etc/fstab | grep -qE "[[:space:]]+${bm}[[:space:]]+"; then
-            if ! mountpoint -q "$bm"; then
-                log "ERROR" "$bm is defined in fstab but NOT mounted. Aborting to prevent data corruption."
-                exit 1
-            fi
-        fi
+    local idx disk marker
+    for idx in "${!AVAILABLE_DISKS[@]}"; do
+        disk="${AVAILABLE_DISKS[$idx]}"
+        marker=""
+        [[ "$disk" == "$SRC_DEVICE" ]] && marker=" [SOURCE]"
+        printf '  [%d] %s %s%s\n' "$((idx + 1))" "$disk" "$(describe_disk "$disk")" "$marker"
     done
 
     # Select Destination
     while true; do
-        echo -e "\nEnter DESTINATION disk name (e.g., sdb, sdc): "
-        read -r dst_name
-        # Reject names containing non-alphanumeric characters to prevent path
-        # traversal or command injection (e.g. "../sda", "sda; rm -rf /").
-        if [[ ! "$dst_name" =~ ^[a-zA-Z0-9]+$ ]]; then
-            echo "Error: Invalid device name '$dst_name'. Only alphanumeric characters are allowed."
-            continue
-        fi
-        DST_DEVICE="/dev/$dst_name"
+        local selection=""
+        printf '\nSelect DESTINATION disk by number or exact path (e.g. 2 or /dev/sdb): '
+        read -r selection
 
-        if [[ ! -b "$DST_DEVICE" ]]; then
-            echo "Error: '$DST_DEVICE' is not a valid block device."
-            continue
+        if [[ "$selection" =~ ^[0-9]+$ ]]; then
+            local choice_index=$((selection - 1))
+            if (( choice_index < 0 || choice_index >= ${#AVAILABLE_DISKS[@]} )); then
+                log "WARN" "Invalid selection index: $selection"
+                continue
+            fi
+            DST_DEVICE="${AVAILABLE_DISKS[$choice_index]}"
+        else
+            DST_DEVICE="$selection"
         fi
+
+        validate_destination_disk "$DST_DEVICE" || continue
+        contains_value "$DST_DEVICE" "${AVAILABLE_DISKS[@]}" || {
+            log "WARN" "Device $DST_DEVICE is not in the current lsblk disk list."
+            continue
+        }
 
         if [[ "$SRC_DEVICE" == "$DST_DEVICE" ]]; then
-            echo "Error: Source and destination cannot be the same device!"
+            log "WARN" "Source and destination cannot be the same device."
             continue
         fi
+
+        ensure_disk_unmounted "$DST_DEVICE"
         break
     done
 
-    # Detect Source Layout to replicate it
-    SRC_TABLE_TYPE=$(detect_partition_table "$SRC_DEVICE")
-    log "INFO" "Detected Source Partition Table: $SRC_TABLE_TYPE"
-    
     # Define Destination Partitions
     DST_PART1=$(get_partition_device "$DST_DEVICE" 1)
     DST_PART2=$(get_partition_device "$DST_DEVICE" 2)
@@ -440,11 +624,12 @@ perform_full_backup() {
     # We check if the USED space on source fits on destination (plus margin).
     # This allows cloning to a smaller drive as long as data fits.
     local boot_mount_point
-    boot_mount_point=$(detect_boot_mount)
+    boot_mount_point="$BOOT_MOUNT"
     check_space "/" "$boot_mount_point" "$DST_DEVICE"
 
     # 1. Wipe and Partition
     # We recreate the partition table to match the source type (MBR or GPT).
+    ensure_disk_unmounted "$DST_DEVICE"
     log "INFO" "Wiping existing signatures..."
     wipefs -a "$DST_DEVICE" >/dev/null 2>&1 || true
 
@@ -454,15 +639,15 @@ perform_full_backup() {
         # to avoid leaving the disk in a partially-partitioned state between calls.
         parted -s -a optimal "$DST_DEVICE" \
             mklabel gpt \
-            mkpart "EFI" fat32 1MiB 1025MiB \
+            mkpart "EFI" fat32 1MiB "$((BOOT_PARTITION_SIZE_MIB + 1))"MiB \
             set 1 esp on \
-            mkpart "Root" ext4 1025MiB 100%
+            mkpart "Root" ext4 "$((BOOT_PARTITION_SIZE_MIB + 1))"MiB 100%
     else
         # RPi/Legacy: MBR (msdos) with 1024 MiB FAT32 boot + root.
         parted -s -a optimal "$DST_DEVICE" \
             mklabel msdos \
-            mkpart primary fat32 1MiB 1025MiB \
-            mkpart primary ext4 1025MiB 100%
+            mkpart primary fat32 1MiB "$((BOOT_PARTITION_SIZE_MIB + 1))"MiB \
+            mkpart primary ext4 "$((BOOT_PARTITION_SIZE_MIB + 1))"MiB 100%
     fi
 
     # Force kernel to reread partition table
@@ -512,6 +697,8 @@ perform_full_backup() {
 # Only updates changed files, much faster than full backup.
 perform_incremental_update() {
     log "INFO" "=== Performing Incremental Update ==="
+    validate_incremental_target_layout
+    ensure_disk_unmounted "$DST_DEVICE"
     
     # 1. Check Filesystem Health (Dirty Check)
     # Ensure destination is clean before mounting to avoid mount failures
@@ -560,9 +747,6 @@ mount_destination() {
     log "INFO" "Mounting root to $DST_MOUNT_ROOT..."
     mount "$DST_PART2" "$DST_MOUNT_ROOT"
     MOUNTED_BY_SCRIPT+=("$DST_MOUNT_ROOT")
-
-    # Determine boot mount point based on ACTIVE mounts
-    BOOT_MOUNT=$(detect_boot_mount)
 
     log "INFO" "Mounting boot to $DST_MOUNT_ROOT$BOOT_MOUNT..."
     mkdir -p "$DST_MOUNT_ROOT$BOOT_MOUNT"
@@ -822,16 +1006,45 @@ verify_backup() {
     log "INFO" "=== Verifying Backup Configuration ==="
 
     local root_uuid root_partuuid
+    local boot_uuid boot_partuuid
     root_uuid=$(get_uuid "$DST_PART2")
     root_partuuid=$(get_partuuid "$DST_PART2")
+    boot_uuid=$(get_uuid "$DST_PART1")
+    boot_partuuid=$(get_partuuid "$DST_PART1")
 
     local failures=0
-
-    # Check fstab — use grep -F for fixed-string matching (no regex injection risk).
-    if grep -v "^[[:space:]]*#" "$DST_MOUNT_ROOT/etc/fstab" | grep -qF -e "$root_uuid" -e "$root_partuuid"; then
-        log "INFO" "[PASS] fstab contains new root UUID/PARTUUID."
+    local expected_root_ref expected_boot_ref
+    if [[ "$SRC_TABLE_TYPE" == "gpt" ]]; then
+        expected_root_ref="UUID=$root_uuid"
+        expected_boot_ref="UUID=$boot_uuid"
     else
-        log "ERROR" "[FAIL] fstab does not contain the new root UUID/PARTUUID."
+        expected_root_ref="PARTUUID=$root_partuuid"
+        expected_boot_ref="PARTUUID=$boot_partuuid"
+    fi
+
+    [[ -f "$DST_MOUNT_ROOT/etc/fstab" ]] || die "Verification failed: destination fstab is missing."
+
+    if awk -v expected="$expected_root_ref" '$0 !~ /^[[:space:]]*#/ && $2 == "/" { found=1; if ($1 == expected) ok=1 } END { exit ! (found && ok) }' "$DST_MOUNT_ROOT/etc/fstab"; then
+        log "INFO" "[PASS] fstab root entry updated to $expected_root_ref."
+    else
+        log "ERROR" "[FAIL] fstab root entry was not updated to $expected_root_ref."
+        ((failures++))
+    fi
+
+    if awk -v expected="$expected_boot_ref" -v boot_mount="$BOOT_MOUNT" '
+        $0 !~ /^[[:space:]]*#/ && NF >= 2 {
+            mount_point = $2
+            if (length(mount_point) > 1) sub(/\/$/, "", mount_point)
+            if (mount_point == boot_mount) {
+                found=1
+                if ($1 == expected) ok=1
+            }
+        }
+        END { exit ! (found && ok) }
+    ' "$DST_MOUNT_ROOT/etc/fstab"; then
+        log "INFO" "[PASS] fstab boot entry updated to $expected_boot_ref."
+    else
+        log "ERROR" "[FAIL] fstab boot entry was not updated to $expected_boot_ref."
         ((failures++))
     fi
 
@@ -849,8 +1062,16 @@ verify_backup() {
     # Check systemd-boot entries (primary path, then fallback).
     local loader_entries_dir="$DST_MOUNT_ROOT$BOOT_MOUNT/loader/entries"
     local alt_loader_dir="$DST_MOUNT_ROOT/boot/loader/entries"
-    _verify_loader_entries "$loader_entries_dir" "$root_uuid" "$root_partuuid" "" ||
-        _verify_loader_entries "$alt_loader_dir" "$root_uuid" "$root_partuuid" "(fallback)" || true
+    if [[ "$SOURCE_BOOTLOADER" == "systemd-boot" ]]; then
+        if _verify_loader_entries "$loader_entries_dir" "$root_uuid" "$root_partuuid" ""; then
+            :
+        elif _verify_loader_entries "$alt_loader_dir" "$root_uuid" "$root_partuuid" "(fallback)"; then
+            :
+        else
+            log "ERROR" "[FAIL] systemd-boot entries were not verified successfully."
+            ((failures++))
+        fi
+    fi
 
     if (( failures > 0 )); then
         die "Verification failed: $failures check(s) did not pass. The cloned system may not boot."
@@ -864,6 +1085,7 @@ verify_backup() {
 ###################
 
 main() {
+    setup_colors
     setup_signal_handlers
     check_root
     check_dependencies
@@ -871,8 +1093,9 @@ main() {
     select_disks
 
     echo "=============================================="
-    echo " Source:      $SRC_DEVICE ($SRC_TABLE_TYPE)"
-    echo " Destination: $DST_DEVICE"
+    echo " Source:      $SRC_DEVICE ($SRC_TABLE_TYPE, root=$SRC_ROOT_FS_TYPE, boot=$BOOT_MOUNT/$SRC_BOOT_FS_TYPE)"
+    echo " Bootloader:  $SOURCE_BOOTLOADER"
+    echo " Destination: $DST_DEVICE ($(describe_disk "$DST_DEVICE"))"
     echo "=============================================="
     echo "WARNING: ALL DATA ON $DST_DEVICE WILL BE ERASED!"
     echo "=============================================="
@@ -901,6 +1124,8 @@ main() {
 
     read -p "Perform FULL BACKUP (Wipe & Clone)? (yes/no): " -r
     if [[ $REPLY =~ ^yes$ ]]; then
+        read -r -p "Type the full destination path to confirm destructive wipe ($DST_DEVICE): " confirmation
+        [[ "$confirmation" == "$DST_DEVICE" ]] || die "Confirmation mismatch. Refusing to wipe $DST_DEVICE."
         perform_full_backup
     else
         log "WARN" "Aborted by user."
