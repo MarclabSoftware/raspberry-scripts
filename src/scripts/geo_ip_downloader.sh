@@ -68,6 +68,7 @@ declare ALLOWED_COUNTRIES_SYNTAX="" # e.g., "ripe:IT,FR;ipdeny:CN"
 declare TEMP_DIR="" # Used for RIPE/Nirsoft downloads
 declare URL_PARSE_HOST=""
 declare URL_PARSE_PORT=""
+declare REQUIRE_IPV6_LISTS="${GEOIP_REQUIRE_IPV6:-true}"
 declare -a MISSING_EXPECTED_FILES=()
 # Cache for resolved hostnames to avoid redundant 'dig' calls
 declare -A RESOLVED_HOSTS_CACHE
@@ -224,6 +225,16 @@ check_dependencies() {
     fi
 
     [[ ${#missing_commands[@]} -eq 0 ]] || die "Missing commands/features: ${missing_commands[*]}"
+}
+
+normalize_runtime_flags() {
+    REQUIRE_IPV6_LISTS="${REQUIRE_IPV6_LISTS,,}"
+    case "$REQUIRE_IPV6_LISTS" in
+    true|false) ;;
+    *)
+        die "Invalid GEOIP_REQUIRE_IPV6 value '$REQUIRE_IPV6_LISTS'. Allowed: true|false"
+        ;;
+    esac
 }
 
 # Logs the current DNS configuration for early-boot stability.
@@ -418,7 +429,7 @@ validate_generated_list_file() {
             return 1
         }
         function is_valid_hex_group(group) {
-            return (group ~ /^[0-9A-Fa-f]{1,4}$/)
+            return (group ~ /^[0-9A-Fa-f]+$/ && length(group) <= 4)
         }
         function validate_ipv6_sequence(seq, groups, count, i, width) {
             if (seq == "") return 0
@@ -476,6 +487,7 @@ validate_generated_list_file() {
         }
         {
             sub(/\r$/, "", $0)
+            sub(/[[:space:]]*[#;].*$/, "", $0)
             gsub(/^[[:space:]]+|[[:space:]]+$/, "", $0)
             if ($0 == "") next
 
@@ -573,8 +585,18 @@ restore_missing_expected_lists() {
         [[ -f "$staging_file" ]] && continue
 
         if [[ "$basename" == *.nirsoft.list.v6 ]]; then
+            if [[ "$REQUIRE_IPV6_LISTS" == "true" ]]; then
+                MISSING_EXPECTED_FILES+=("$family:$basename")
+            else
+                : > "$staging_file"
+                log "INFO" "Created empty IPv6 placeholder for Nirsoft list: $basename"
+            fi
+            continue
+        fi
+
+        if [[ "$family" == "v6" && "$REQUIRE_IPV6_LISTS" != "true" ]]; then
             : > "$staging_file"
-            log "INFO" "Created empty IPv6 placeholder for Nirsoft list: $basename"
+            log "WARN" "IPv6 list unavailable but optional for this run. Using empty placeholder: $basename"
             continue
         fi
 
@@ -633,8 +655,16 @@ download_and_validate_simple() {
         return
     fi
 
-    # Clean the file: remove comments, blank lines, and DOS carriage returns.
-    sed -i -e '/^#/d' -e '/^$/d' -e 's/\r$//' "$temp_outfile"
+    # Normalize comment-only lines and inline annotations before persisting the file.
+    awk '
+        {
+            sub(/\r$/, "", $0)
+            sub(/[[:space:]]*[#;].*$/, "", $0)
+            gsub(/^[[:space:]]+|[[:space:]]+$/, "", $0)
+            if ($0 != "") print
+        }
+    ' "$temp_outfile" > "${temp_outfile}.cleaned" || die "Failed to normalize $proto_name list"
+    mv -f -- "${temp_outfile}.cleaned" "$temp_outfile" || die "Failed to finalize normalized $proto_name list"
 
     validate_and_move_generated_file "$temp_outfile" "$outfile" "$proto_name"
 }
@@ -885,6 +915,11 @@ export -f _download_country_nirsoft
 # @param $@ A list of country codes (e.g., "IT" "FR" "DE")
 download_provider_nirsoft() {
     local -a countries=("$@")
+
+    if [[ "$REQUIRE_IPV6_LISTS" == "true" ]]; then
+        die "Provider 'nirsoft' does not publish IPv6 country lists and cannot satisfy GEOIP_REQUIRE_IPV6=true."
+    fi
+
     log "INFO" "Using provider: Nirsoft (Parallel Mode, IPv4 only) for ${countries[*]}"
     for code in "${countries[@]}"; do
         wait_for_job_slot
@@ -904,6 +939,7 @@ main() {
     setup_signal_handlers
     parse_arguments "$@"
     normalize_and_validate_country_syntax
+    normalize_runtime_flags
     log_dns_config
 
     # 2. Check for all required tools

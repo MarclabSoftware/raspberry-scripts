@@ -1032,7 +1032,7 @@ separate_ip_families() {
                     return 1
                 }
                 function is_valid_hex_group(group) {
-                    return (group ~ /^[0-9A-Fa-f]{1,4}$/)
+                    return (group ~ /^[0-9A-Fa-f]+$/ && length(group) <= 4)
                 }
                 function validate_ipv6_sequence(seq, groups, count, i, width) {
                     if (seq == "") return 0
@@ -1087,7 +1087,9 @@ separate_ip_families() {
                 }
                 {
                     sub(/\r$/, "", $0)
-                    sub(/[[:space:]]+#.*$/, "", $0)
+                    # Some feeds (for example Spamhaus DROPv6) annotate entries
+                    # with semicolon comments instead of hash comments.
+                    sub(/[[:space:]]*[#;].*$/, "", $0)
                     gsub(/^[[:space:]]+|[[:space:]]+$/, "", $0)
                     if ($0 == "") next
 
@@ -1144,7 +1146,10 @@ generate_ip_list() {
     # successful cache. If it still fails, continuing with whatever happens to
     # be present in lists/allow could apply a stale allowlist for the wrong
     # country/provider request, so we fail safe here.
-    if ! try_command "$COUNTRY_IPS_DOWNLOADER" -c "$downloader_countries_arg"; then
+    local downloader_require_ipv6=true
+    [[ "$GEOBLOCK_IPV6" == true ]] || downloader_require_ipv6=false
+
+    if ! try_command env "GEOIP_REQUIRE_IPV6=$downloader_require_ipv6" "$COUNTRY_IPS_DOWNLOADER" -c "$downloader_countries_arg"; then
         die "Country IP download failed. Refusing to apply potentially stale allowlists."
     fi
 
