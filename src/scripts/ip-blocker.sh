@@ -11,7 +11,8 @@
 # Core Features:
 # - Auto-Backend: Prefers 'nftables', falls back to 'iptables'/'ipset'.
 # - Geo-IP Filtering: Full IPv4 & optional IPv6. Supports multiple providers
-#   (ipdeny, ripe, nirsoft) and manual 'lists/allow/v4/*.v4' files via iprange 2.0.
+#   (ipdeny, ripe, nirsoft) plus persistent manual 'lists/manual.v4' and
+#   'lists/manual.v6' files via iprange 2.0.
 # - Flowtable Offload: Hardware/Software offload for established connections
 #   (nftables only) to boost throughput and reduce CPU load.
 # - Default Deny Policy: Secures the host (INPUT) while safely filtering
@@ -66,15 +67,39 @@ declare -r SCRIPT_DIR
 declare -r COUNTRY_IPS_DOWNLOADER="$SCRIPT_DIR/geo_ip_downloader.sh"
 # Directory structure
 declare -r IP_LIST_DIR="$SCRIPT_DIR/lists"
-declare -r ALLOW_LIST_DIR_V4="$IP_LIST_DIR/allow/v4"
-declare -r ALLOW_LIST_DIR_V6="$IP_LIST_DIR/allow/v6"
-declare -r BLOCK_LIST_DIR="$IP_LIST_DIR/block/raw"
-declare -r BLOCK_LIST_DIR_V4="$IP_LIST_DIR/block/v4"
-declare -r BLOCK_LIST_DIR_V6="$IP_LIST_DIR/block/v6"
+declare -r GENERATED_ALLOW_ROOT_DIR="$IP_LIST_DIR/allow/generated"
+declare -r ALLOW_LIST_DIR_V4="$GENERATED_ALLOW_ROOT_DIR/v4"
+declare -r ALLOW_LIST_DIR_V6="$GENERATED_ALLOW_ROOT_DIR/v6"
+declare -r ALLOW_SOURCE_ROOT_DIR="$IP_LIST_DIR/allow/sources"
+declare -r ALLOW_SOURCE_DIR_V4="$ALLOW_SOURCE_ROOT_DIR/v4"
+declare -r ALLOW_SOURCE_DIR_V6="$ALLOW_SOURCE_ROOT_DIR/v6"
+declare -r ALLOW_DOMAIN_ROOT_DIR="$IP_LIST_DIR/allow/domains"
+declare -r ALLOW_DOMAIN_DIR_V4="$ALLOW_DOMAIN_ROOT_DIR/v4"
+declare -r ALLOW_DOMAIN_DIR_V6="$ALLOW_DOMAIN_ROOT_DIR/v6"
+declare -r MANUAL_ALLOW_ROOT_DIR="$IP_LIST_DIR/allow/manual"
+declare -r MANUAL_ALLOW_LIST_DIR_V4="$MANUAL_ALLOW_ROOT_DIR/v4"
+declare -r MANUAL_ALLOW_LIST_DIR_V6="$MANUAL_ALLOW_ROOT_DIR/v6"
+declare -r MANUAL_ALLOW_SOURCES_FILE="$MANUAL_ALLOW_ROOT_DIR/sources.txt"
+declare -r MANUAL_ALLOW_DOMAINS_FILE="$MANUAL_ALLOW_ROOT_DIR/domains.txt"
+declare -r LEGACY_MANUAL_ALLOW_SOURCES_FILE="$IP_LIST_DIR/manual_allowlist.txt"
+declare -r LEGACY_MANUAL_ALLOW_LIST_V4="$IP_LIST_DIR/manual.v4"
+declare -r LEGACY_MANUAL_ALLOW_LIST_V6="$IP_LIST_DIR/manual.v6"
+declare -r BLOCK_SOURCE_ROOT_DIR="$IP_LIST_DIR/block/sources"
+declare -r BLOCK_LIST_DIR="$BLOCK_SOURCE_ROOT_DIR/raw"
+declare -r BLOCK_LIST_DIR_V4="$BLOCK_SOURCE_ROOT_DIR/v4"
+declare -r BLOCK_LIST_DIR_V6="$BLOCK_SOURCE_ROOT_DIR/v6"
+declare -r BLOCK_DOMAIN_ROOT_DIR="$IP_LIST_DIR/block/domains"
+declare -r BLOCK_DOMAIN_DIR_V4="$BLOCK_DOMAIN_ROOT_DIR/v4"
+declare -r BLOCK_DOMAIN_DIR_V6="$BLOCK_DOMAIN_ROOT_DIR/v6"
+declare -r MANUAL_BLOCK_ROOT_DIR="$IP_LIST_DIR/block/manual"
+declare -r MANUAL_BLOCK_LIST_DIR_V4="$MANUAL_BLOCK_ROOT_DIR/v4"
+declare -r MANUAL_BLOCK_LIST_DIR_V6="$MANUAL_BLOCK_ROOT_DIR/v6"
+declare -r MANUAL_BLOCK_DOMAINS_FILE="$MANUAL_BLOCK_ROOT_DIR/domains.txt"
 # URL for the v4 blocklist index
 declare -r BLOCK_LIST_URL="https://raw.githubusercontent.com/Adamm00/IPSet_ASUS/master/filter.list"
-declare -r BLOCK_LIST_FILE_NAME="$IP_LIST_DIR/blocklists.txt"
-declare -r MANUAL_BLOCK_LIST="$IP_LIST_DIR/manual_blocklist.txt"
+declare -r BLOCK_LIST_FILE_NAME="$BLOCK_SOURCE_ROOT_DIR/index.txt"
+declare -r MANUAL_BLOCK_SOURCES_FILE="$MANUAL_BLOCK_ROOT_DIR/sources.txt"
+declare -r LEGACY_MANUAL_BLOCK_SOURCES_FILE="$IP_LIST_DIR/manual_blocklist.txt"
 # Our main table name for nftables
 declare -r NFT_TABLE_NAME="labo_firewall"
 # Names for our sets/ipsets
@@ -94,8 +119,9 @@ declare -r CONNECTIVITY_MAX_WAIT=120
 declare -r CONNECTIVITY_RETRY_INTERVAL=10
 # Lock directory for singleton execution
 declare -r LOCK_DIR="/var/run/ip-blocker.lock"
-# RFC 1918 private IPv4 ranges — used in both nftables sets and iptables rules.
-declare -ra PRIVATE_NETS_V4=("10.0.0.0/8" "172.16.0.0/12" "192.168.0.0/16")
+# RFC 1918 private IPv4 ranges plus the unspecified address used by DHCP/BOOTP
+# clients before configuration — used in both nftables sets and iptables rules.
+declare -ra PRIVATE_NETS_V4=("0.0.0.0/32" "10.0.0.0/8" "172.16.0.0/12" "192.168.0.0/16")
 # Link-local, ULA, and multicast IPv6 ranges — must always bypass Geo-IP.
 declare -ra PRIVATE_NETS_V6=("fe80::/10" "fc00::/7" "ff00::/8")
 # Interfaces used for POSTROUTING masquerade (NAT).
@@ -510,7 +536,7 @@ detect_backend() {
     log "INFO" "Detecting firewall backend..."
     if command -v nft &>/dev/null; then
         FIREWALL_BACKEND="nftables"
-        REQUIRED_COMMANDS=(curl iprange nft grep sed awk cp)
+        REQUIRED_COMMANDS=(curl iprange nft grep sed awk cp getent)
         [[ "$USE_BLOCKLIST" == true ]] && REQUIRED_COMMANDS+=(cksum)
         log "INFO" "Backend selected: nftables (native)"
 
@@ -523,7 +549,7 @@ detect_backend() {
     elif command -v iptables &>/dev/null && command -v ipset &>/dev/null; then
         FIREWALL_BACKEND="iptables"
         # Dynamically add IPv6 tools only if needed
-        REQUIRED_COMMANDS=(curl ipset iptables iprange iptables-restore iptables-save grep sed awk cp)
+        REQUIRED_COMMANDS=(curl ipset iptables iprange iptables-restore iptables-save grep sed awk cp getent)
         [[ "$USE_BLOCKLIST" == true ]] && REQUIRED_COMMANDS+=(cksum)
         if [[ "$GEOBLOCK_IPV6" == true ]]; then
              REQUIRED_COMMANDS+=(ip6tables ip6tables-restore ip6tables-save)
@@ -860,16 +886,23 @@ download_blocklists() {
         urls+=("$line")
     done < "$BLOCK_LIST_FILE_NAME"
 
-    # 2. Parse Unified Manual List (v4/v6/hybrid)
-    if [[ -f "$MANUAL_BLOCK_LIST" ]]; then
-        log "INFO" "Adding manual blocklists from $MANUAL_BLOCK_LIST"
+    # 2. Parse additional manual blocklist sources (canonical path first).
+    if [[ -f "$MANUAL_BLOCK_SOURCES_FILE" ]]; then
+        log "INFO" "Adding manual blocklist sources from $MANUAL_BLOCK_SOURCES_FILE"
         while IFS= read -r line; do
             [[ -z "$line" || "${line:0:1}" == "#" ]] && continue
             line="${line//$'\r'/}"
             urls+=("$line")
-        done < "$MANUAL_BLOCK_LIST"
-    else
-        log "WARN" "Manual blocklist file not found: $MANUAL_BLOCK_LIST. Proceeding with repo lists only."
+        done < "$MANUAL_BLOCK_SOURCES_FILE"
+    fi
+
+    if [[ -f "$LEGACY_MANUAL_BLOCK_SOURCES_FILE" ]]; then
+        log "WARN" "Legacy manual blocklist source file detected: $LEGACY_MANUAL_BLOCK_SOURCES_FILE. Prefer $MANUAL_BLOCK_SOURCES_FILE."
+        while IFS= read -r line; do
+            [[ -z "$line" || "${line:0:1}" == "#" ]] && continue
+            line="${line//$'\r'/}"
+            urls+=("$line")
+        done < "$LEGACY_MANUAL_BLOCK_SOURCES_FILE"
     fi
 
     for url in "${urls[@]}"; do
@@ -1116,6 +1149,331 @@ separate_ip_families() {
     log "INFO" "Separation complete."
 }
 
+directory_has_files() {
+    local dir="$1"
+    [[ -d "$dir" ]] || return 1
+    compgen -G "${dir%/}/*" >/dev/null
+}
+
+copy_directory_contents_if_present() {
+    local src_dir="$1"
+    local dst_dir="$2"
+    local -a files=()
+
+    directory_has_files "$src_dir" || return 0
+    files=("$src_dir"/*)
+    cp -f "${files[@]}" "$dst_dir"/
+}
+
+split_ip_families_from_file() {
+    local input_file="$1"
+    local out_v4="$2"
+    local out_v6="$3"
+    local want_v6=0
+
+    [[ "$GEOBLOCK_IPV6" == true ]] && want_v6=1
+
+    if file_has_markup_header "$input_file"; then
+        log "WARN" "File '$(basename "$input_file")' appears to be HTML/XML (invalid content). Skipping."
+        return 1
+    fi
+
+    awk -v out_v4="$out_v4" -v out_v6="$out_v6" -v want_v6="$want_v6" '
+        function is_valid_cidr(prefix, maxbits) {
+            return (prefix ~ /^[0-9]+$/ && prefix + 0 >= 0 && prefix + 0 <= maxbits)
+        }
+        function is_valid_ipv4(addr, parts, count, i, host) {
+            host = addr
+            if (addr ~ /\//) {
+                count = split(addr, parts, "/")
+                if (count != 2 || !is_valid_cidr(parts[2], 32)) return 0
+                host = parts[1]
+            }
+            count = split(host, parts, ".")
+            if (count != 4) return 0
+            for (i = 1; i <= 4; i++) {
+                if (parts[i] !~ /^[0-9]+$/ || parts[i] + 0 > 255) return 0
+            }
+            return 1
+        }
+        function is_valid_hex_group(group) {
+            return (group ~ /^[0-9A-Fa-f]+$/ && length(group) <= 4)
+        }
+        function validate_ipv6_sequence(seq, groups, count, i, width) {
+            if (seq == "") return 0
+            count = split(seq, groups, ":")
+            width = 0
+            for (i = 1; i <= count; i++) {
+                if (groups[i] ~ /\./) {
+                    if (i != count || groups[i] ~ /\// || !is_valid_ipv4(groups[i])) return -1
+                    width += 2
+                    continue
+                }
+                if (!is_valid_hex_group(groups[i])) return -1
+                width++
+            }
+            return width
+        }
+        function is_valid_ipv6(addr, parts, host, tmp, halves, left_width, right_width, total_width) {
+            host = addr
+            if (addr ~ /\//) {
+                if (split(addr, parts, "/") != 2 || !is_valid_cidr(parts[2], 128)) return 0
+                host = parts[1]
+            }
+            if (host !~ /:/ || host ~ /:::/) return 0
+            if (host == "::") return 1
+            if (host ~ /^:[^:]/ || host ~ /[^:]:$/) return 0
+
+            tmp = host
+            if (gsub(/::/, "@", tmp) > 1) return 0
+
+            if (index(host, "::")) {
+                split(host, halves, /::/)
+                left_width = validate_ipv6_sequence(halves[1])
+                right_width = validate_ipv6_sequence(halves[2])
+                if (left_width < 0 || right_width < 0) return 0
+                total_width = left_width + right_width
+                return (total_width < 8)
+            }
+
+            total_width = validate_ipv6_sequence(host)
+            return (total_width == 8)
+        }
+        function ipv4_to_int(addr, octets) {
+            split(addr, octets, ".")
+            return (((octets[1] * 256 + octets[2]) * 256 + octets[3]) * 256 + octets[4])
+        }
+        function is_valid_ipv4_range(addr_range, parts, start_ip, end_ip) {
+            if (split(addr_range, parts, /[[:space:]]+-[[:space:]]+/) != 2) return 0
+            if (parts[1] ~ /\// || parts[2] ~ /\// || !is_valid_ipv4(parts[1]) || !is_valid_ipv4(parts[2])) return 0
+            start_ip = ipv4_to_int(parts[1])
+            end_ip = ipv4_to_int(parts[2])
+            return (start_ip <= end_ip)
+        }
+        {
+            sub(/\r$/, "", $0)
+            sub(/[[:space:]]*[#;].*$/, "", $0)
+            gsub(/^[[:space:]]+|[[:space:]]+$/, "", $0)
+            if ($0 == "") next
+
+            if (is_valid_ipv4($0) || is_valid_ipv4_range($0)) {
+                print >> out_v4
+                next
+            }
+
+            if (want_v6 && is_valid_ipv6($0)) {
+                print >> out_v6
+            }
+        }
+    ' "$input_file"
+}
+
+download_manual_allow_sources() {
+    log "INFO" "Refreshing remote allowlist sources..."
+
+    local staging_v4="$TEMP_DIR/allow_sources_v4"
+    local staging_v6="$TEMP_DIR/allow_sources_v6"
+    local -a urls=()
+    local -A scheduled_files=()
+    local url cache_name temp_file
+    local had_cached_copy=false
+    local had_any_valid_output=false
+
+    mkdir -p "$staging_v4" "$staging_v6" || die "Failed to prepare allowlist source staging directories."
+
+    if [[ -f "$MANUAL_ALLOW_SOURCES_FILE" ]]; then
+        log "INFO" "Loading remote allowlist sources from $MANUAL_ALLOW_SOURCES_FILE"
+        while IFS= read -r line; do
+            [[ -z "$line" || "${line:0:1}" == "#" ]] && continue
+            line="${line//$'\r'/}"
+            urls+=("$line")
+        done < "$MANUAL_ALLOW_SOURCES_FILE"
+    fi
+
+    if [[ -f "$LEGACY_MANUAL_ALLOW_SOURCES_FILE" ]]; then
+        log "WARN" "Legacy manual allowlist source file detected: $LEGACY_MANUAL_ALLOW_SOURCES_FILE. Prefer $MANUAL_ALLOW_SOURCES_FILE."
+        while IFS= read -r line; do
+            [[ -z "$line" || "${line:0:1}" == "#" ]] && continue
+            line="${line//$'\r'/}"
+            urls+=("$line")
+        done < "$LEGACY_MANUAL_ALLOW_SOURCES_FILE"
+    fi
+
+    if [[ ${#urls[@]} -eq 0 ]]; then
+        log "INFO" "No remote allowlist sources configured."
+        atomic_swap_directory "$staging_v4" "$ALLOW_SOURCE_DIR_V4" "$TEMP_DIR/allow_sources_v4.backup"
+        atomic_swap_directory "$staging_v6" "$ALLOW_SOURCE_DIR_V6" "$TEMP_DIR/allow_sources_v6.backup"
+        return 0
+    fi
+
+    for url in "${urls[@]}"; do
+        cache_name=$(blocklist_cache_name_from_url "$url")
+        [[ -n "${scheduled_files[$cache_name]:-}" ]] && continue
+        scheduled_files[$cache_name]=1
+
+        temp_file=$(mktemp --tmpdir="$TEMP_DIR") || die "Failed to create temp file for remote allowlist source."
+        had_cached_copy=false
+        had_any_valid_output=false
+
+        local -a resolve_opts=()
+        local resolve_opts_str=""
+        if [[ -n "${DNS_SERVERS:-}" ]]; then
+            build_resolve_options_for_url "$url" resolve_opts_str
+            [[ -n "$resolve_opts_str" ]] && read -ra resolve_opts <<< "$resolve_opts_str"
+        fi
+
+        if curl -fsSL "${resolve_opts[@]}" -o "$temp_file" --connect-timeout 15 --max-time 90 "$url" 2>/dev/null; then
+            if file_has_markup_header "$temp_file"; then
+                log "WARN" "Remote allowlist source appears to contain HTML/XML and will be discarded: $url"
+                rm -f "$temp_file"
+            else
+                split_ip_families_from_file "$temp_file" "$staging_v4/$cache_name.v4" "$staging_v6/$cache_name.v6" || true
+                if [[ -s "$staging_v4/$cache_name.v4" || -s "$staging_v6/$cache_name.v6" ]]; then
+                    had_any_valid_output=true
+                else
+                    log "WARN" "Remote allowlist source $url produced no valid IPv4/IPv6 entries."
+                fi
+            fi
+        fi
+
+        if [[ "$had_any_valid_output" != true ]]; then
+            if [[ -f "$ALLOW_SOURCE_DIR_V4/$cache_name.v4" ]]; then
+                cp -f "$ALLOW_SOURCE_DIR_V4/$cache_name.v4" "$staging_v4/$cache_name.v4"
+                had_cached_copy=true
+            fi
+            if [[ -f "$ALLOW_SOURCE_DIR_V6/$cache_name.v6" ]]; then
+                cp -f "$ALLOW_SOURCE_DIR_V6/$cache_name.v6" "$staging_v6/$cache_name.v6"
+                had_cached_copy=true
+            fi
+
+            if [[ "$had_cached_copy" == true ]]; then
+                log "WARN" "Using cached remote allowlist source for $url"
+            else
+                log "WARN" "Skipping unavailable remote allowlist source with no cache: $url"
+            fi
+        fi
+
+        rm -f "$temp_file"
+    done
+
+    atomic_swap_directory "$staging_v4" "$ALLOW_SOURCE_DIR_V4" "$TEMP_DIR/allow_sources_v4.backup"
+    atomic_swap_directory "$staging_v6" "$ALLOW_SOURCE_DIR_V6" "$TEMP_DIR/allow_sources_v6.backup"
+    log "INFO" "Remote allowlist source refresh complete."
+}
+
+domain_cache_name_from_hostname() {
+    local host="${1,,}"
+    host="${host//[^a-z0-9._-]/_}"
+    printf '%s' "$host"
+}
+
+resolve_domain_family_to_file() {
+    local domain="$1"
+    local family="$2"
+    local output_file="$3"
+    local -a servers=()
+    local -a resolved=()
+    local ns
+
+    rm -f "$output_file"
+
+    if [[ -n "${DNS_SERVERS:-}" ]]; then
+        read -ra servers <<< "$DNS_SERVERS"
+        for ns in "${servers[@]}"; do
+            if [[ "$family" == "A" ]]; then
+                mapfile -t resolved < <(dig +short "@$ns" "$domain" A 2>/dev/null | awk '$1 ~ /^[0-9.]+$/ && !seen[$1]++ { print $1 }')
+            else
+                mapfile -t resolved < <(dig +short "@$ns" "$domain" AAAA 2>/dev/null | awk '$1 ~ /:/ && !seen[$1]++ { print $1 }')
+            fi
+            if ((${#resolved[@]} > 0)); then
+                printf '%s\n' "${resolved[@]}" > "$output_file"
+                return 0
+            fi
+        done
+        return 1
+    fi
+
+    if [[ "$family" == "A" ]]; then
+        getent ahostsv4 "$domain" 2>/dev/null | awk '$1 ~ /^[0-9.]+$/ && !seen[$1]++ { print $1 }' > "$output_file" || true
+    else
+        getent ahostsv6 "$domain" 2>/dev/null | awk '$1 ~ /:/ && !seen[$1]++ { print $1 }' > "$output_file" || true
+    fi
+
+    [[ -s "$output_file" ]] || { rm -f "$output_file"; return 1; }
+    return 0
+}
+
+refresh_manual_domain_cache() {
+    local label="$1"
+    local domains_file="$2"
+    local cache_dir_v4="$3"
+    local cache_dir_v6="$4"
+    local stage_v4="$TEMP_DIR/${label}_domains_v4"
+    local stage_v6="$TEMP_DIR/${label}_domains_v6"
+    local line domain family extra cache_base
+    local any_satisfied=false
+
+    log "INFO" "Refreshing manual $label domain cache..."
+    mkdir -p "$stage_v4" "$stage_v6" || die "Failed to prepare manual $label domain staging directories."
+
+    if [[ ! -f "$domains_file" ]]; then
+        log "INFO" "No manual $label domain file found at $domains_file"
+        atomic_swap_directory "$stage_v4" "$cache_dir_v4" "$TEMP_DIR/${label}_domains_v4.backup"
+        atomic_swap_directory "$stage_v6" "$cache_dir_v6" "$TEMP_DIR/${label}_domains_v6.backup"
+        return 0
+    fi
+
+    while IFS= read -r line || [[ -n "$line" ]]; do
+        line="${line//$'\r'/}"
+        line="${line%%#*}"
+        line="${line%%;*}"
+        read -r domain family extra <<< "$line"
+        [[ -z "${domain:-}" ]] && continue
+        [[ -z "${extra:-}" ]] || die "Invalid manual $label domain entry '$line'. Use: hostname [A|AAAA|BOTH]"
+
+        domain="${domain,,}"
+        family="${family^^}"
+        [[ -n "$family" ]] || family="BOTH"
+        case "$family" in
+            A|AAAA|BOTH) ;;
+            *) die "Invalid address family '$family' for manual $label domain '$domain'. Use A, AAAA, or BOTH." ;;
+        esac
+
+        cache_base=$(domain_cache_name_from_hostname "$domain")
+        any_satisfied=false
+
+        if [[ "$family" == "A" || "$family" == "BOTH" ]]; then
+            if resolve_domain_family_to_file "$domain" A "$stage_v4/$cache_base.v4"; then
+                any_satisfied=true
+            elif [[ -f "$cache_dir_v4/$cache_base.v4" ]]; then
+                cp -f "$cache_dir_v4/$cache_base.v4" "$stage_v4/$cache_base.v4"
+                log "WARN" "Using cached IPv4 entry for manual $label domain: $domain"
+                any_satisfied=true
+            elif [[ "$family" == "A" ]]; then
+                die "Failed to resolve required IPv4 record for manual $label domain '$domain' and no cache exists."
+            fi
+        fi
+
+        if [[ "$family" == "AAAA" || "$family" == "BOTH" ]]; then
+            if resolve_domain_family_to_file "$domain" AAAA "$stage_v6/$cache_base.v6"; then
+                any_satisfied=true
+            elif [[ -f "$cache_dir_v6/$cache_base.v6" ]]; then
+                cp -f "$cache_dir_v6/$cache_base.v6" "$stage_v6/$cache_base.v6"
+                log "WARN" "Using cached IPv6 entry for manual $label domain: $domain"
+                any_satisfied=true
+            elif [[ "$family" == "AAAA" ]]; then
+                die "Failed to resolve required IPv6 record for manual $label domain '$domain' and no cache exists."
+            fi
+        fi
+
+        [[ "$any_satisfied" == true ]] || die "Failed to resolve manual $label domain '$domain' for every requested family and no cache exists."
+    done < "$domains_file"
+
+    atomic_swap_directory "$stage_v4" "$cache_dir_v4" "$TEMP_DIR/${label}_domains_v4.backup"
+    atomic_swap_directory "$stage_v6" "$cache_dir_v6" "$TEMP_DIR/${label}_domains_v6.backup"
+    log "INFO" "Manual $label domain cache refresh complete."
+}
+
 # Generate the final, optimized IP list files
 generate_ip_list() {
     log "INFO" "Generating optimized IP range lists..."
@@ -1130,7 +1488,9 @@ generate_ip_list() {
     [[ -f "$COUNTRY_IPS_DOWNLOADER" && -x "$COUNTRY_IPS_DOWNLOADER" ]] || die "$COUNTRY_IPS_DOWNLOADER script not found/executable"
 
     # Optimizer command for IPv4: --ipset-reduce merges adjacent/overlapping ranges.
-    local iprange_cmd=(iprange --ipset-reduce 20)
+    # IPv6 mode does not support --ipset-reduce on the deployed iprange version.
+    local iprange_cmd_v4=(iprange --ipset-reduce 20)
+    local iprange_cmd_v6=(iprange)
 
     # Run the downloader script to get .list.v4 and .list.v6 files
     local downloader_countries_arg
@@ -1153,13 +1513,61 @@ generate_ip_list() {
         die "Country IP download failed. Refusing to apply potentially stale allowlists."
     fi
 
+    download_manual_allow_sources
+    refresh_manual_domain_cache allow "$MANUAL_ALLOW_DOMAINS_FILE" "$ALLOW_DOMAIN_DIR_V4" "$ALLOW_DOMAIN_DIR_V6"
+    refresh_manual_domain_cache block "$MANUAL_BLOCK_DOMAINS_FILE" "$BLOCK_DOMAIN_DIR_V4" "$BLOCK_DOMAIN_DIR_V6"
+
+    local merged_allow_dir_v4="$TEMP_DIR/allow_v4_merged"
+    local merged_allow_dir_v6="$TEMP_DIR/allow_v6_merged"
+    local final_allow_dir_v4="$TEMP_DIR/allow_v4_final"
+    local final_allow_dir_v6="$TEMP_DIR/allow_v6_final"
+    local final_block_dir_v4="$TEMP_DIR/block_v4_final"
+    local final_block_dir_v6="$TEMP_DIR/block_v6_final"
+    local generated_stage_v4="$TEMP_DIR/generated_allow_stage.v4"
+    local generated_stage_v6="$TEMP_DIR/generated_allow_stage.v6"
+    local effective_stage_v4="$TEMP_DIR/effective_allow_stage.v4"
+    local effective_stage_v6="$TEMP_DIR/effective_allow_stage.v6"
+    mkdir -p "$merged_allow_dir_v4" "$merged_allow_dir_v6" "$final_allow_dir_v4" "$final_allow_dir_v6" \
+        "$final_block_dir_v4" "$final_block_dir_v6" \
+        || die "Failed to prepare merged allowlist directories."
+
     # --- Optimize IPv4 List ---
     if [[ "$USE_BLOCKLIST" == true && -d "$BLOCK_LIST_CLEAN_V4_DIR" ]] && compgen -G "${BLOCK_LIST_CLEAN_V4_DIR%/}/*" >/dev/null; then
-        log "INFO" "Optimizing IPv4 allow lists with native blocklist subtraction (@directory)..."
-        "${iprange_cmd[@]}" @"$ALLOW_LIST_DIR_V4" --except @"$BLOCK_LIST_CLEAN_V4_DIR" >"$IP_RANGE_FILE_V4"
+        log "INFO" "Building IPv4 allow base with remote blocklist subtraction..."
+        "${iprange_cmd_v4[@]}" @"$ALLOW_LIST_DIR_V4" --except @"$BLOCK_LIST_CLEAN_V4_DIR" >"$generated_stage_v4"
     else
-        log "INFO" "Optimizing IPv4 allow lists..."
-        "${iprange_cmd[@]}" @"$ALLOW_LIST_DIR_V4" >"$IP_RANGE_FILE_V4"
+        log "INFO" "Building IPv4 allow base..."
+        "${iprange_cmd_v4[@]}" @"$ALLOW_LIST_DIR_V4" >"$generated_stage_v4"
+    fi
+
+    if [[ -s "$generated_stage_v4" ]]; then
+        cp -f "$generated_stage_v4" "$merged_allow_dir_v4/generated.v4"
+    else
+        log "WARN" "Generated IPv4 allow base is empty after remote blocklist subtraction."
+    fi
+
+    copy_directory_contents_if_present "$ALLOW_DOMAIN_DIR_V4" "$merged_allow_dir_v4"
+    copy_directory_contents_if_present "$ALLOW_SOURCE_DIR_V4" "$merged_allow_dir_v4"
+    copy_directory_contents_if_present "$MANUAL_ALLOW_LIST_DIR_V4" "$merged_allow_dir_v4"
+    if [[ -s "$LEGACY_MANUAL_ALLOW_LIST_V4" ]]; then
+        log "WARN" "Legacy manual IPv4 allowlist detected: $LEGACY_MANUAL_ALLOW_LIST_V4. Prefer $MANUAL_ALLOW_LIST_DIR_V4."
+        cp -f "$LEGACY_MANUAL_ALLOW_LIST_V4" "$merged_allow_dir_v4/legacy-manual.v4"
+    fi
+
+    directory_has_files "$merged_allow_dir_v4" || die "No IPv4 allowlist inputs available after merging generated, remote, and manual sources."
+
+    log "INFO" "Optimizing IPv4 allow lists..."
+    "${iprange_cmd_v4[@]}" @"$merged_allow_dir_v4" >"$effective_stage_v4"
+    [[ -s "$effective_stage_v4" ]] || die "Merged IPv4 allowlist is empty. Aborting."
+
+    cp -f "$effective_stage_v4" "$final_allow_dir_v4/effective.v4"
+    copy_directory_contents_if_present "$BLOCK_DOMAIN_DIR_V4" "$final_block_dir_v4"
+    copy_directory_contents_if_present "$MANUAL_BLOCK_LIST_DIR_V4" "$final_block_dir_v4"
+    if directory_has_files "$final_block_dir_v4"; then
+        log "INFO" "Applying manual IPv4 blocklist veto..."
+        "${iprange_cmd_v4[@]}" @"$final_allow_dir_v4" --except @"$final_block_dir_v4" >"$IP_RANGE_FILE_V4"
+    else
+        cp -f "$effective_stage_v4" "$IP_RANGE_FILE_V4"
     fi
 
     # CRITICAL safety check
@@ -1174,13 +1582,50 @@ generate_ip_list() {
         return
     fi
     
-    log "INFO" "Optimizing IPv6 allow lists..."
     if [[ "$USE_BLOCKLIST" == true && -d "$BLOCK_LIST_CLEAN_V6_DIR" ]] && compgen -G "${BLOCK_LIST_CLEAN_V6_DIR%/}/*" >/dev/null; then
-        log "INFO" "Optimizing IPv6 lists with native blocklist subtraction (@directory)..."
-        "${iprange_cmd[@]}" -6 @"$ALLOW_LIST_DIR_V6" --except @"$BLOCK_LIST_CLEAN_V6_DIR" > "$IP_RANGE_FILE_V6"
+        log "INFO" "Building IPv6 allow base with remote blocklist subtraction..."
+        "${iprange_cmd_v6[@]}" -6 @"$ALLOW_LIST_DIR_V6" --except @"$BLOCK_LIST_CLEAN_V6_DIR" > "$generated_stage_v6"
     else
-        log "INFO" "Optimizing IPv6 lists..."
-        "${iprange_cmd[@]}" -6 @"$ALLOW_LIST_DIR_V6" > "$IP_RANGE_FILE_V6"
+        log "INFO" "Building IPv6 allow base..."
+        "${iprange_cmd_v6[@]}" -6 @"$ALLOW_LIST_DIR_V6" > "$generated_stage_v6"
+    fi
+
+    if [[ -s "$generated_stage_v6" ]]; then
+        cp -f "$generated_stage_v6" "$merged_allow_dir_v6/generated.v6"
+    else
+        log "WARN" "Generated IPv6 allow base is empty after remote blocklist subtraction."
+    fi
+
+    copy_directory_contents_if_present "$ALLOW_DOMAIN_DIR_V6" "$merged_allow_dir_v6"
+    copy_directory_contents_if_present "$ALLOW_SOURCE_DIR_V6" "$merged_allow_dir_v6"
+    copy_directory_contents_if_present "$MANUAL_ALLOW_LIST_DIR_V6" "$merged_allow_dir_v6"
+    if [[ -s "$LEGACY_MANUAL_ALLOW_LIST_V6" ]]; then
+        log "WARN" "Legacy manual IPv6 allowlist detected: $LEGACY_MANUAL_ALLOW_LIST_V6. Prefer $MANUAL_ALLOW_LIST_DIR_V6."
+        cp -f "$LEGACY_MANUAL_ALLOW_LIST_V6" "$merged_allow_dir_v6/legacy-manual.v6"
+    fi
+
+    if ! directory_has_files "$merged_allow_dir_v6"; then
+        log "WARN" "No IPv6 allowlist inputs available after merging generated, remote, and manual sources."
+        ((nullglob_was_enabled == 1)) || shopt -u nullglob
+        return
+    fi
+
+    log "INFO" "Optimizing IPv6 allow lists..."
+    "${iprange_cmd_v6[@]}" -6 @"$merged_allow_dir_v6" > "$effective_stage_v6"
+    if [[ ! -s "$effective_stage_v6" ]]; then
+        log "WARN" "Merged IPv6 allowlist is empty. IPv6 Geo-IP will not be active."
+        ((nullglob_was_enabled == 1)) || shopt -u nullglob
+        return
+    fi
+
+    cp -f "$effective_stage_v6" "$final_allow_dir_v6/effective.v6"
+    copy_directory_contents_if_present "$BLOCK_DOMAIN_DIR_V6" "$final_block_dir_v6"
+    copy_directory_contents_if_present "$MANUAL_BLOCK_LIST_DIR_V6" "$final_block_dir_v6"
+    if directory_has_files "$final_block_dir_v6"; then
+        log "INFO" "Applying manual IPv6 blocklist veto..."
+        "${iprange_cmd_v6[@]}" -6 @"$final_allow_dir_v6" --except @"$final_block_dir_v6" > "$IP_RANGE_FILE_V6"
+    else
+        cp -f "$effective_stage_v6" "$IP_RANGE_FILE_V6"
     fi
 
     if [[ ! -s "$IP_RANGE_FILE_V6" ]]; then
@@ -1811,7 +2256,15 @@ main() {
     check_installed_commands
 
     # 6. Create directories
-    mkdir -p "$ALLOW_LIST_DIR_V4" "$ALLOW_LIST_DIR_V6" "$BLOCK_LIST_DIR" "$BLOCK_LIST_DIR_V4" "$BLOCK_LIST_DIR_V6" || die "Failed to create directories"
+    mkdir -p \
+        "$ALLOW_LIST_DIR_V4" "$ALLOW_LIST_DIR_V6" \
+        "$ALLOW_SOURCE_DIR_V4" "$ALLOW_SOURCE_DIR_V6" \
+        "$ALLOW_DOMAIN_DIR_V4" "$ALLOW_DOMAIN_DIR_V6" \
+        "$MANUAL_ALLOW_LIST_DIR_V4" "$MANUAL_ALLOW_LIST_DIR_V6" \
+        "$BLOCK_LIST_DIR" "$BLOCK_LIST_DIR_V4" "$BLOCK_LIST_DIR_V6" \
+        "$BLOCK_DOMAIN_DIR_V4" "$BLOCK_DOMAIN_DIR_V6" \
+        "$MANUAL_BLOCK_LIST_DIR_V4" "$MANUAL_BLOCK_LIST_DIR_V6" \
+        || die "Failed to create directories"
 
     # 7. Download v4 blocklists if -b is used.
     # Non-fatal: if the remote index is unreachable (transient DNS/network issue),

@@ -13,8 +13,9 @@
 # - Parallel & Safe: Runs concurrent downloads and validates all lists to
 #   remove empty or unsafe entries (e.g., 0.0.0.0/0).
 # - Normalized Output: Generates standardized '.list.v4' and '.list.v6' files
-#   inside 'lists/allow/v4' and 'lists/allow/v6' respectively, ready for 
-#   consumption by 'ip-blocker.sh' via iprange >=2.0 directory loading.
+#   inside 'lists/allow/generated/v4' and 'lists/allow/generated/v6'
+#   respectively, ready for consumption by 'ip-blocker.sh' via iprange >=2.0
+#   directory loading.
 #
 # Usage:
 #   ./geo_ip_downloader.sh -c SYNTAX [-h]
@@ -47,7 +48,7 @@ set -Eeuo pipefail
 # Get the script's absolute directory
 SCRIPT_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" &>/dev/null && pwd)
 readonly SCRIPT_DIR
-readonly ALLOW_ROOT_DIR="$SCRIPT_DIR/lists/allow"
+readonly ALLOW_ROOT_DIR="$SCRIPT_DIR/lists/allow/generated"
 # Define the output directories for allowed lists
 readonly ALLOW_DIR_V4="$ALLOW_ROOT_DIR/v4"
 readonly ALLOW_DIR_V6="$ALLOW_ROOT_DIR/v6"
@@ -147,7 +148,7 @@ Usage: $0 -c PROVIDER:COUNTRIES_LIST[;PROVIDER2:LIST2...] [-h]
 
 Description:
     Downloads and parses Geo-IP lists from specified providers.
-    Generates standardized .list.v4 and .list.v6 files in the 'lists/allow/v4' and 'v6' directories.
+    Generates standardized .list.v4 and .list.v6 files in the 'lists/allow/generated/v4' and 'v6' directories.
 
 Options:
     -c syntax   Provider and country list specification. [Mandatory]
